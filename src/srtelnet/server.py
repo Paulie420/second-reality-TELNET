@@ -29,6 +29,7 @@ import argparse
 import asyncio
 import logging
 import os
+import socket
 import sys
 import time
 from pathlib import Path
@@ -66,6 +67,16 @@ DEFAULT_GOODBYE_HOLD = 30.0
 # of squashing chafa output into an unreadable mess.
 MIN_COLS = 40
 MIN_ROWS = 20
+# Upper bound on any single writer.drain() in the playback loop. If the
+# client stops ACKing for this long, we treat them as dead and disconnect
+# cleanly instead of blocking the whole shell on a zombie socket.
+DRAIN_TIMEOUT = 10.0
+# Path to the persistent lifetime connection counter. Relative to the
+# server's working directory. Overridable via --counter-file or the
+# SRTELNET_COUNTER_FILE env var. Stored as a plain ASCII integer.
+DEFAULT_COUNTER_FILE = Path(
+    os.environ.get("SRTELNET_COUNTER_FILE", "state/counter.txt")
+)
 
 # ANSI control strings (telnetlib3 accepts str, emits utf-8 on the wire)
 HIDE_CURSOR = "\x1b[?25l"
@@ -169,24 +180,28 @@ def render_frame_at(lines: list[str], top: int, left: int) -> str:
 
 
 # ---------------------------------------------------------------- welcome
-# Figlet "slant" font, pre-rendered. Stored as raw strings so we don't need
-# figlet on the host. SECOND is 38 cols wide, REALITY is 45 cols wide — the
-# two blocks are centered independently, so the shape looks natural. TELNET
-# lives in the subtitle band instead of the figlet stack so the whole
-# welcome screen fits on a classic 80x25 terminal.
+# Figlet "smslant" (small slant) font, pre-rendered. Stored as raw strings
+# so we don't need figlet on the host. Four rows tall each, same slant
+# shape as the full slant font — small enough to stack all three
+# (SECOND / REALITY / TELNET) and still leave room for info, controls,
+# and a press-any-key prompt on a classic 80x25 terminal.
 _FIGLET_SECOND = [
-    r"   _____ ________________  _   ______ ",
-    r"  / ___// ____/ ____/ __ \/ | / / __ \ ",
-    r"  \__ \/ __/ / /   / / / /  |/ / / / /",
-    r" ___/ / /___/ /___/ /_/ / /|  / /_/ / ",
-    r"/____/_____/\____/\____/_/ |_/_____/  ",
+    r"   _________________  _  _____ ",
+    r"  / __/ __/ ___/ __ \/ |/ / _ \ ",
+    r" _\ \/ _// /__/ /_/ /    / // /",
+    r"/___/___/\___/\____/_/|_/____/ ",
 ]
 _FIGLET_REALITY = [
-    r"    ____  _________    __    ____________  __",
-    r"   / __ \/ ____/   |  / /   /  _/_  __/\ \/ /",
-    r"  / /_/ / __/ / /| | / /    / /  / /    \  / ",
-    r" / _, _/ /___/ ___ |/ /____/ /  / /     / /  ",
-    r"/_/ |_/_____/_/  |_/_____/___/ /_/     /_/   ",
+    r"   ___  _______   __   ____________  __",
+    r"  / _ \/ __/ _ | / /  /  _/_  __/\ \/ /",
+    r" / , _/ _// __ |/ /___/ /  / /    \  / ",
+    r"/_/|_/___/_/ |_/____/___/ /_/     /_/  ",
+]
+_FIGLET_TELNET = [
+    r" ____________   _  ____________",
+    r"/_  __/ __/ /  / |/ / __/_  __/",
+    r" / / / _// /__/    / _/  / /   ",
+    r"/_/ /___/____/_/|_/___/ /_/    ",
 ]
 
 # Truecolor helpers. Modern terminals speak 24-bit; 256-color and 16-color
@@ -212,13 +227,52 @@ _BOLD     = "\x1b[1m"
 _BLINK    = "\x1b[5m"
 
 
-def render_welcome(cols: int, rows: int, session: int = 0) -> str:
-    """Render a BBS-style truecolor ANSI welcome screen. Designed to fit
-    exactly on an 80x25 terminal with everything visible — no scroll, no
-    clipping. Taller terminals just get extra top/bottom margin.
+def _build_banner() -> list[tuple[str, str]]:
+    """Build the 'SECOND REALITY / TELNET' banner as a list of (line, color)
+    tuples, 8 rows tall, up to 72 cols wide.
 
-    `session` is the connection counter since server start — shown in the
-    stats line as #N for a little BBS flavor. 0 hides it."""
+    Layout:
+
+        SECOND REALITY
+                TELNET
+
+    SECOND and REALITY are joined with a single space on the top 4 rows.
+    TELNET sits on the bottom 4 rows, right-aligned under REALITY so the
+    whole thing reads like a logo with a subtitle. The caller centers the
+    entire block horizontally."""
+    s_w = max(len(l) for l in _FIGLET_SECOND)
+    r_w = max(len(l) for l in _FIGLET_REALITY)
+    t_w = max(len(l) for l in _FIGLET_TELNET)
+    second  = [l.ljust(s_w) for l in _FIGLET_SECOND]
+    reality = [l.ljust(r_w) for l in _FIGLET_REALITY]
+    telnet  = [l.ljust(t_w) for l in _FIGLET_TELNET]
+
+    banner_w = s_w + 1 + r_w                 # top row width
+    telnet_pad = max(0, banner_w - t_w)      # right-align TELNET
+
+    rows_out: list[tuple[str, str]] = []
+    # Top half: SECOND + space + REALITY, each padded so every top row is
+    # exactly banner_w wide (important for consistent centering).
+    for i in range(4):
+        line = f"{second[i]} {reality[i]}".ljust(banner_w)
+        rows_out.append((line, _BOLD + _C_FIRE[i % len(_C_FIRE)]))
+    # Bottom half: TELNET, indented so its right edge matches REALITY's.
+    for i in range(4):
+        line = (" " * telnet_pad + telnet[i]).ljust(banner_w)
+        rows_out.append((line, _BOLD + _C_FIRE[(i + 2) % len(_C_FIRE)]))
+    return rows_out
+
+
+def render_welcome(
+    cols: int, rows: int, session: int = 0, lifetime: int = 0
+) -> str:
+    """Render a BBS-style truecolor ANSI welcome screen. Designed to fit
+    exactly on an 80x25 terminal — taller terminals just get extra top/
+    bottom margin via the centering math.
+
+    `session` is the connection counter since this process started.
+    `lifetime` is the persistent all-time connection counter. Both slot
+    into the stats line when non-zero."""
     raw: list[str] = []     # plaintext, for centering math
     col: list[str] = []     # colored, for output
 
@@ -226,57 +280,46 @@ def render_welcome(cols: int, rows: int, session: int = 0) -> str:
         raw.append(line)
         col.append(f"{color}{line}{RESET}" if color else line)
 
-    # Pad each figlet block to a uniform width so all its lines center together
-    s_w = max(len(l) for l in _FIGLET_SECOND)
-    r_w = max(len(l) for l in _FIGLET_REALITY)
-    second = [l.ljust(s_w) for l in _FIGLET_SECOND]
-    reality = [l.ljust(r_w) for l in _FIGLET_REALITY]
+    # --- figlet banner (8 rows): SECOND REALITY / TELNET in fire gradient
+    for line, color in _build_banner():
+        add(line, color)
 
-    # --- figlet banner: SECOND / REALITY in fire gradient (10 rows)
-    for i, ln in enumerate(second):
-        add(ln, _BOLD + _C_FIRE[i % len(_C_FIRE)])
-    for i, ln in enumerate(reality):
-        add(ln, _BOLD + _C_FIRE[(i + 2) % len(_C_FIRE)])
-
-    add("")  # spacer between banner and subtitle
-
-    # --- subtitle band (3 rows, with TELNET EDITION in the text since it
-    # doesn't fit as a third figlet block on 80x25)
+    # --- subtitle band (3 rows)
     bar = "\u2593\u2592\u2591" + "\u2550" * 48 + "\u2591\u2592\u2593"
     add(bar, _C_PURPLE)
-    add("\u00bb FUTURE CREW  \u00b7  1993  \u00b7  TELNET EDITION \u00ab", _C_GOLD + _BOLD)
+    add("\u00bb  FUTURE CREW  \u00b7  1993  \u00b7  demoscene immortal  \u00ab",
+        _C_GOLD + _BOLD)
     add(bar, _C_PURPLE)
 
-    # --- stats (1 row). Session counter slots in when non-zero.
+    # --- stats (1 row) with session + lifetime counters when available
+    parts = ["15,244 frames", "30 fps", "truecolor ANSI"]
     if session > 0:
-        stats = (f"[ 15,244 frames  \u00b7  30 fps  \u00b7  truecolor ANSI  "
-                 f"\u00b7  session #{session} ]")
-    else:
-        stats = "[ 15,244 frames  \u00b7  30 fps  \u00b7  truecolor ANSI  \u00b7  9 width buckets ]"
+        parts.append(f"session #{session}")
+    if lifetime > 0:
+        parts.append(f"lifetime #{lifetime}")
+    stats = "[ " + "  \u00b7  ".join(parts) + " ]"
     add(stats, _C_CYAN)
 
     # --- one-line credits (1 row)
-    add("thanks: Future Crew  \u00b7  Jeff Quast  \u00b7  Hans Petter Jansson", _C_DIM)
+    add("thanks: Future Crew  \u00b7  Jeff Quast  \u00b7  Hans Petter Jansson",
+        _C_DIM)
 
     add("")  # spacer between info and controls
 
-    # --- controls box — all rows 44 cells wide (2 corners + 42 interior), 5 rows
+    # --- controls box (5 rows, 44 cells wide)
     add("\u250c" + "\u2500" * 16 + " CONTROLS " + "\u2500" * 16 + "\u2510", _C_DIM)
     add("\u2502   q  or  Ctrl-C     quit                 \u2502", _C_WHITE)
     add("\u2502   space             pause / resume       \u2502", _C_WHITE)
     add("\u2502   \u2190 / \u2192             seek -/+ 5 seconds   \u2502", _C_WHITE)
     add("\u2514" + "\u2500" * 42 + "\u2518", _C_DIM)
 
-    add("")  # spacer between controls and signoff
-
     # --- signoff + prompt (2 rows)
     add("streamed by paulie420  \u00b7  20forbeers.com", _C_GREEN)
     add(">>>   PRESS ANY KEY TO JACK IN   <<<", _BOLD + _BLINK + _C_PINK)
-    # Total: 10 + 1 + 3 + 1 + 1 + 1 + 5 + 1 + 2 = 25 rows. Exactly 80x25.
+    # Total: 8 (banner) + 3 (subtitle) + 1 (stats) + 1 (credits) + 1 (gap)
+    # + 5 (controls) + 2 (signoff) = 21 rows. Centered in 25 gives 2-row
+    # top margin + 2-row bottom margin.
 
-    # Note: the controls-box border and subtitle bar contain unicode
-    # box-drawing / block chars, which len() counts as single cells — that
-    # matches how a monospace terminal renders them, so centering is correct.
     n = len(raw)
     top = max(0, (rows - n) // 2)
     out = [HOME, CLEAR]
@@ -287,11 +330,13 @@ def render_welcome(cols: int, rows: int, session: int = 0) -> str:
     return "".join(out)
 
 
-def render_goodbye(cols: int, rows: int) -> str:
-    """BBS-style exit screen, styled to match the welcome. Fire-gradient
-    SECOND/REALITY figlet callback, 20forbeers.com BBS advert, classic
-    'NO CARRIER' dial-up sign-off. Held on the client until they press a
-    key or the server times it out. Designed to fit 80x25."""
+def render_goodbye(
+    cols: int, rows: int, session: int = 0, lifetime: int = 0
+) -> str:
+    """BBS-style exit screen, shares its banner with the welcome so they
+    feel like a matched pair. Fire-gradient SECOND REALITY / TELNET logo,
+    20forbeers.com BBS ad, classic 'NO CARRIER' dial-up sign-off. Held on
+    the client until they press a key or the hold timer expires."""
     raw: list[str] = []
     col: list[str] = []
 
@@ -299,37 +344,37 @@ def render_goodbye(cols: int, rows: int) -> str:
         raw.append(line)
         col.append(f"{color}{line}{RESET}" if color else line)
 
-    # Pad each figlet block to a uniform width so lines center together
-    s_w = max(len(l) for l in _FIGLET_SECOND)
-    r_w = max(len(l) for l in _FIGLET_REALITY)
-    second = [l.ljust(s_w) for l in _FIGLET_SECOND]
-    reality = [l.ljust(r_w) for l in _FIGLET_REALITY]
+    # --- figlet banner (8 rows): same shape as the welcome
+    for line, color in _build_banner():
+        add(line, color)
 
-    # --- figlet banner: SECOND / REALITY in fire gradient (10 rows)
-    for i, ln in enumerate(second):
-        add(ln, _BOLD + _C_FIRE[i % len(_C_FIRE)])
-    for i, ln in enumerate(reality):
-        add(ln, _BOLD + _C_FIRE[(i + 2) % len(_C_FIRE)])
-
-    add("")  # spacer between banner and BBS advert
-
-    # --- subtitle band with BBS name (same style as welcome)
+    # --- subtitle band with BBS name (3 rows)
     bar = "\u2593\u2592\u2591" + "\u2550" * 48 + "\u2591\u2592\u2593"
     add(bar, _C_PURPLE)
-    add("\u00bb  2o fOr beeRS bbS  \u00ab", _C_GOLD + _BOLD)
+    add("\u00bb  2o fOr beeRS bbS  \u00b7  dial in today  \u00ab",
+        _C_GOLD + _BOLD)
     add(bar, _C_PURPLE)
 
-    # --- BBS ad block
-    add("WEBSITE :  20ForBeers.com", _C_CYAN)
-    add("")
-    add("An ANSi TELNET BBS:", _C_WHITE)
+    # --- stats: close the loop on which connection the user was (1 row)
+    if lifetime > 0:
+        stats = f"[ you were connection #{lifetime} of all time ]"
+    elif session > 0:
+        stats = f"[ you were session #{session} this run ]"
+    else:
+        stats = "[ thanks for jacking in ]"
+    add(stats, _C_CYAN)
+
+    # --- BBS ad block (7 rows)
+    add("WEBSITE :  20ForBeers.com", _C_WHITE)
+    add("An ANSi TELNET BBS:", _C_DIM)
     add("TELNET  :  20ForBeers.com:1337", _C_CYAN)
     add("SSH     :  20ForBeers.com:1338", _C_CYAN)
     add("")
     add("'Dial-in' Today!", _C_GREEN + _BOLD)
-    add("")
     # Classic modem drop — one last BBS callback on the way out
     add("NO CARRIER", _BOLD + _C_PINK)
+    # Total: 8 + 3 + 1 + 4 + 1 + 1 + 1 = 19 rows. Plus top/bottom margin
+    # auto-centered by the rows - n math below.
 
     n = len(raw)
     top = max(1, (rows - n) // 2)
@@ -411,9 +456,79 @@ async def key_reader(reader, queue: asyncio.Queue) -> None:
 
 # ---------------------------------------------------------------- shell
 
-# Monotonic counter incremented per connection. Resets on server restart.
-# Used for the "session #N" line on the welcome screen.
+# Per-process session counter — total connections since this process started.
+# Resets on server restart.
 _SESSION_COUNTER = 0
+
+# Lifetime connection counter — total connections ever served, persisted to
+# disk so restarts don't lose the count. Loaded at startup from _COUNTER_PATH
+# and rewritten on every new connection. Best-effort: if the file is missing
+# or unwritable we log a warning and keep counting in memory.
+_LIFETIME_COUNTER = 0
+_COUNTER_PATH: Path | None = None
+
+
+def load_counter(path: Path) -> int:
+    """Read the persistent lifetime counter from disk. Returns 0 if the file
+    doesn't exist, is empty, or can't be parsed — the counter is best-effort,
+    never fatal."""
+    try:
+        raw = path.read_text(encoding="ascii").strip()
+        return int(raw) if raw else 0
+    except FileNotFoundError:
+        return 0
+    except (ValueError, OSError) as e:
+        log.warning("counter file %s unreadable (%s); starting at 0", path, e)
+        return 0
+
+
+def save_counter(path: Path, value: int) -> None:
+    """Atomically persist the lifetime counter. Writes to a temp file and
+    renames so a crash mid-write can't corrupt the file. Never raises —
+    write failures log a warning and the in-memory counter keeps ticking."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(f"{value}\n", encoding="ascii")
+        tmp.replace(path)
+    except OSError as e:
+        log.warning("counter file %s unwritable (%s); lifetime count not saved",
+                    path, e)
+
+
+async def _drain_bounded(writer) -> None:
+    """Drain the write buffer with a hard timeout. A wedged client (slow
+    cellular, misbehaving proxy) can otherwise block the shell forever.
+    Raises ConnectionResetError on timeout so the play loop treats it as a
+    disconnect — same branch as a real RST."""
+    try:
+        await asyncio.wait_for(writer.drain(), timeout=DRAIN_TIMEOUT)
+    except asyncio.TimeoutError as e:
+        raise ConnectionResetError("drain timeout") from e
+
+
+def _enable_keepalive(writer) -> None:
+    """Turn on TCP keepalive for this connection so dead peers are detected
+    faster than the OS default (~2 hours on Linux). Best-effort: silently
+    no-ops on platforms / transports that don't expose a socket."""
+    try:
+        sock = writer.get_extra_info("socket")
+    except Exception:
+        return
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        # Linux-only knobs: start probing after 30s idle, probe every 10s,
+        # give up after 3 failed probes. Total dead-peer detection ~= 60s.
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+        if hasattr(socket, "TCP_KEEPCNT"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+    except OSError as e:
+        log.debug("keepalive setsockopt failed: %s", e)
 
 
 async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> str:
@@ -430,7 +545,10 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> str:
              peer, bucket.width, bucket.width, bucket.height, left, top, n_frames)
 
     writer.write(CLEAR + HOME)
-    await writer.drain()
+    try:
+        await _drain_bounded(writer)
+    except (ConnectionResetError, BrokenPipeError):
+        return "DISCONNECT"
 
     i = 0
     paused = False
@@ -488,7 +606,7 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> str:
         try:
             lines = read_frame(bucket, i)
             writer.write(render_frame_at(lines, top, left))
-            await writer.drain()
+            await _drain_bounded(writer)
         except (ConnectionResetError, BrokenPipeError):
             return "DISCONNECT"
         except Exception as e:
@@ -518,12 +636,20 @@ async def _drain_keys(key_q: asyncio.Queue) -> None:
 async def shell(reader, writer) -> None:
     """Per-connection coroutine:
        welcome → play → goodbye (held until keypress or timeout)"""
-    global _SESSION_COUNTER
+    global _SESSION_COUNTER, _LIFETIME_COUNTER
     _SESSION_COUNTER += 1
+    _LIFETIME_COUNTER += 1
     session = _SESSION_COUNTER
+    lifetime = _LIFETIME_COUNTER
+    if _COUNTER_PATH is not None:
+        save_counter(_COUNTER_PATH, lifetime)
+
+    # Turn on TCP keepalive so dead clients are detected in ~60s instead of
+    # the kernel default (~2 hours on Linux).
+    _enable_keepalive(writer)
 
     peer = writer.get_extra_info("peername", ("?", 0))
-    log.info("connect %s session=%d", peer, session)
+    log.info("connect %s session=%d lifetime=%d", peer, session, lifetime)
 
     fps = float(os.environ.get("SRTELNET_FPS", DEFAULT_FPS))
 
@@ -556,7 +682,7 @@ async def shell(reader, writer) -> None:
         await writer.drain()
 
         # --- welcome screen ---
-        writer.write(render_welcome(cols, rows, session=session))
+        writer.write(render_welcome(cols, rows, session=session, lifetime=lifetime))
         await writer.drain()
 
         try:
@@ -574,7 +700,7 @@ async def shell(reader, writer) -> None:
 
         # --- goodbye / BBS ad: held until keypress or timeout ---
         try:
-            writer.write(render_goodbye(cols, rows))
+            writer.write(render_goodbye(cols, rows, session=session, lifetime=lifetime))
             await writer.drain()
         except Exception:
             return
@@ -617,6 +743,10 @@ def main() -> int:
                     help="drop frames [START, END) from playback (can be "
                          "repeated). Default skips the 11s still landscape "
                          "section. Pass '--skip none' to disable all skips.")
+    ap.add_argument("--counter-file", type=Path, default=DEFAULT_COUNTER_FILE,
+                    help=f"persistent lifetime connection counter file "
+                         f"(default {DEFAULT_COUNTER_FILE}, overridable via "
+                         f"$SRTELNET_COUNTER_FILE)")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="debug-level logging")
     args = ap.parse_args()
@@ -648,6 +778,13 @@ def main() -> int:
     # FPS is read from env var inside the shell coroutine so the admin can
     # override without code changes. Stash the CLI choice there.
     os.environ["SRTELNET_FPS"] = str(args.fps)
+
+    # Load the persistent lifetime counter so the welcome screen can show
+    # a real "connection #N ever" tally across restarts.
+    global _COUNTER_PATH, _LIFETIME_COUNTER
+    _COUNTER_PATH = args.counter_file
+    _LIFETIME_COUNTER = load_counter(_COUNTER_PATH)
+    log.info("lifetime counter: %d (from %s)", _LIFETIME_COUNTER, _COUNTER_PATH)
 
     load_all_buckets(args.frames)
 
