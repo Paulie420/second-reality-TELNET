@@ -12,9 +12,12 @@ telnet 20forbeers.com
 
 That's it. Connect from any terminal with truecolor support (iTerm2, Alacritty, Kitty,
 Wezterm, Windows Terminal, most Linux terminal emulators), and you'll get the full demo
-streamed frame-by-frame in ANSI. No client install, no audio, no JavaScript, no webpage.
-Just bytes into your terminal the way the demoscene gods intended — well, the way they
-*would* have intended if 1993 had 16.7 million colors per cell.
+streamed frame-by-frame in ANSI. **Heads up:** classic BBS clients like Syncterm and
+Netrunner *won't* work — they don't speak 24-bit color SGR sequences, so you'll just see
+a mess. Use a modern terminal emulator instead. No client install, no audio, no
+JavaScript, no webpage. Just bytes into your terminal the way the demoscene gods
+intended — well, the way they *would* have intended if 1993 had 16.7 million colors per
+cell.
 
 For the smoothest experience, use an **80x25** window. Bigger terminals get higher-res
 buckets (up to 200x75), but also need more bandwidth — see
