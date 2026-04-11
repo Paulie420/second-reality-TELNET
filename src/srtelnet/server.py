@@ -67,10 +67,22 @@ DEFAULT_GOODBYE_HOLD = 30.0
 # of squashing chafa output into an unreadable mess.
 MIN_COLS = 40
 MIN_ROWS = 20
-# Upper bound on any single writer.drain() in the playback loop. If the
-# client stops ACKing for this long, we treat them as dead and disconnect
-# cleanly instead of blocking the whole shell on a zombie socket.
-DRAIN_TIMEOUT = 10.0
+# Upper bound on any single writer.drain() in the playback loop. We only
+# call drain when the write buffer is known to be small (see below), so a
+# wedged drain means the client really has stopped ACKing. Generous
+# timeout with keepalive as the eventual backstop.
+DRAIN_TIMEOUT = 30.0
+# Write-buffer backpressure knobs. A WAN client with less bandwidth than
+# the frame stream produces (up to ~2 MB/s on the 200-wide bucket) will
+# fill the kernel send buffer, and writer.drain() will block waiting for
+# the client to catch up. Rather than blocking (and then tripping the
+# drain timeout and killing the connection), we check the transport's
+# queued-byte count BEFORE each frame and skip the frame if we're backed
+# up — the same coping strategy the wall-clock skip logic uses, but
+# keyed on actual network state instead of elapsed time.
+WRITE_BUF_HIGH = 1024 * 1024   # 1 MB: drain blocks above this
+WRITE_BUF_LOW = 256 * 1024     # 256 KB: drain returns below this
+WRITE_BUF_SKIP = 512 * 1024    # 512 KB: skip next frame above this
 # Path to the persistent lifetime connection counter. Relative to the
 # server's working directory. Overridable via --counter-file or the
 # SRTELNET_COUNTER_FILE env var. Stored as a plain ASCII integer.
@@ -507,6 +519,37 @@ async def _drain_bounded(writer) -> None:
         raise ConnectionResetError("drain timeout") from e
 
 
+def _configure_write_buffer(writer) -> None:
+    """Set explicit high/low watermarks on the underlying transport so
+    backpressure kicks in at predictable points (not whatever the event
+    loop's default is). Paired with _write_buffer_size() checks in the
+    play loop to skip frames instead of blocking when a WAN client can't
+    keep up."""
+    try:
+        transport = writer.transport
+        if transport is None:
+            return
+        transport.set_write_buffer_limits(
+            high=WRITE_BUF_HIGH, low=WRITE_BUF_LOW
+        )
+    except (AttributeError, NotImplementedError, OSError) as e:
+        log.debug("set_write_buffer_limits failed: %s", e)
+
+
+def _write_buffer_size(writer) -> int:
+    """How many bytes are queued in the transport's send buffer right now.
+    Used to decide whether the client is keeping up; if this grows beyond
+    WRITE_BUF_SKIP we skip the next frame instead of stuffing more data
+    into a buffer the client clearly can't drain."""
+    try:
+        transport = writer.transport
+        if transport is None:
+            return 0
+        return transport.get_write_buffer_size()
+    except (AttributeError, NotImplementedError):
+        return 0
+
+
 def _enable_keepalive(writer) -> None:
     """Turn on TCP keepalive for this connection so dead peers are detected
     faster than the OS default (~2 hours on Linux). Best-effort: silently
@@ -603,6 +646,16 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> str:
         if delay > 0:
             await asyncio.sleep(delay)
 
+        # Backpressure skip: if the client hasn't drained the previous
+        # frames yet (slow WAN link, congested uplink, etc.) don't stack
+        # another 50-80 KB on top — drop this frame instead. Lets the
+        # skip-frame rate track real network speed instead of wall clock.
+        if _write_buffer_size(writer) > WRITE_BUF_SKIP:
+            skipped += 1
+            i += 1
+            target += frame_interval
+            continue
+
         try:
             lines = read_frame(bucket, i)
             writer.write(render_frame_at(lines, top, left))
@@ -647,6 +700,9 @@ async def shell(reader, writer) -> None:
     # Turn on TCP keepalive so dead clients are detected in ~60s instead of
     # the kernel default (~2 hours on Linux).
     _enable_keepalive(writer)
+    # Explicit write-buffer watermarks so the play loop's backpressure
+    # check has a predictable threshold to compare against.
+    _configure_write_buffer(writer)
 
     peer = writer.get_extra_info("peername", ("?", 0))
     log.info("connect %s session=%d lifetime=%d", peer, session, lifetime)
