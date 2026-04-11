@@ -59,17 +59,13 @@ DEFAULT_SKIPS: list[tuple[int, int]] = [(1346, 1676)]
 # before transitioning to the goodbye message. Compensates for the fact that
 # MAX_FRAMES = 15249 stops a hair before the video technically ends.
 DEFAULT_END_HOLD = 0.5
-# After playback, show the 20forbeers.com advert for this long before the
-# replay prompt. Keystrokes during this window are buffered for the prompt.
-DEFAULT_ADVERT_HOLD = 4.0
+# How long we hold the goodbye/BBS-ad screen after the demo ends before
+# dropping the connection. Any keypress short-circuits the wait.
+DEFAULT_GOODBYE_HOLD = 30.0
 # Smallest terminal we'll serve. Below this we politely disconnect instead
 # of squashing chafa output into an unreadable mess.
 MIN_COLS = 40
 MIN_ROWS = 20
-# Path to the 20forbeers.com advert (truecolor ANSI, chafa-rendered from
-# the source PNG so it uses the same pipeline as the video frames).
-# Resolved relative to the package at import time.
-ADVERT_PATH = Path(__file__).resolve().parent.parent.parent / "assets" / "20forbeers_advert.ans"
 
 # ANSI control strings (telnetlib3 accepts str, emits utf-8 on the wire)
 HIDE_CURSOR = "\x1b[?25l"
@@ -292,8 +288,10 @@ def render_welcome(cols: int, rows: int, session: int = 0) -> str:
 
 
 def render_goodbye(cols: int, rows: int) -> str:
-    """Rad BBS-style goodbye. Small centered card with fire-gradient title,
-    box border, and a sign-off. Shown on any clean disconnect."""
+    """BBS-style exit screen, styled to match the welcome. Fire-gradient
+    SECOND/REALITY figlet callback, 20forbeers.com BBS advert, classic
+    'NO CARRIER' dial-up sign-off. Held on the client until they press a
+    key or the server times it out. Designed to fit 80x25."""
     raw: list[str] = []
     col: list[str] = []
 
@@ -301,22 +299,37 @@ def render_goodbye(cols: int, rows: int) -> str:
         raw.append(line)
         col.append(f"{color}{line}{RESET}" if color else line)
 
-    # Same subtitle band style as welcome, but shorter
-    bar = "\u2593\u2592\u2591" + "\u2550" * 40 + "\u2591\u2592\u2593"
-    add("")
+    # Pad each figlet block to a uniform width so lines center together
+    s_w = max(len(l) for l in _FIGLET_SECOND)
+    r_w = max(len(l) for l in _FIGLET_REALITY)
+    second = [l.ljust(s_w) for l in _FIGLET_SECOND]
+    reality = [l.ljust(r_w) for l in _FIGLET_REALITY]
+
+    # --- figlet banner: SECOND / REALITY in fire gradient (10 rows)
+    for i, ln in enumerate(second):
+        add(ln, _BOLD + _C_FIRE[i % len(_C_FIRE)])
+    for i, ln in enumerate(reality):
+        add(ln, _BOLD + _C_FIRE[(i + 2) % len(_C_FIRE)])
+
+    add("")  # spacer between banner and BBS advert
+
+    # --- subtitle band with BBS name (same style as welcome)
+    bar = "\u2593\u2592\u2591" + "\u2550" * 48 + "\u2591\u2592\u2593"
     add(bar, _C_PURPLE)
-    add("\u00bb  THANKS FOR JACKING IN  \u00ab", _BOLD + _C_GOLD)
+    add("\u00bb  2o fOr beeRS bbS  \u00ab", _C_GOLD + _BOLD)
     add(bar, _C_PURPLE)
+
+    # --- BBS ad block
+    add("WEBSITE :  20ForBeers.com", _C_CYAN)
     add("")
-    add("you just watched Second Reality (Future Crew, 1993)", _C_WHITE)
-    add("rendered frame-by-frame into truecolor ANSI", _C_DIM)
+    add("An ANSi TELNET BBS:", _C_WHITE)
+    add("TELNET  :  20ForBeers.com:1337", _C_CYAN)
+    add("SSH     :  20ForBeers.com:1338", _C_CYAN)
     add("")
-    add("\u2500 more from paulie420 \u2500", _C_PINK + _BOLD)
-    add("  \u2023  20forbeers.com   \u2014  BBS + web + stuff", _C_WHITE)
-    add("  \u2023  telnet 20forbeers.com 1337   \u2014  the BBS", _C_WHITE)
+    add("'Dial-in' Today!", _C_GREEN + _BOLD)
     add("")
-    add("so long, space cowboy.", _C_GREEN + _BOLD)
-    add("")
+    # Classic modem drop — one last BBS callback on the way out
+    add("NO CARRIER", _BOLD + _C_PINK)
 
     n = len(raw)
     top = max(1, (rows - n) // 2)
@@ -324,62 +337,7 @@ def render_goodbye(cols: int, rows: int) -> str:
     for i, (r_line, c_line) in enumerate(zip(raw, col)):
         pad = max(0, (cols - len(r_line)) // 2)
         out.append(f"\x1b[{top + i};1H{' ' * pad}{c_line}")
-    # Park the cursor below the card so the user's shell doesn't redraw on top
-    out.append(f"\x1b[{min(rows, top + n + 1)};1H\r\n")
-    return "".join(out)
-
-
-# ---------------------------------------------------------------- advert
-_ADVERT_CACHE: str | None = None
-
-
-def load_advert() -> str:
-    """Load the truecolor ANSI advert from assets/. Cached after first read."""
-    global _ADVERT_CACHE
-    if _ADVERT_CACHE is not None:
-        return _ADVERT_CACHE
-    try:
-        _ADVERT_CACHE = ADVERT_PATH.read_text(encoding="utf-8")
-        log.info("advert loaded: %d bytes from %s",
-                 len(_ADVERT_CACHE.encode("utf-8")), ADVERT_PATH)
-    except FileNotFoundError:
-        log.warning("advert not found at %s — ad screen will be skipped",
-                    ADVERT_PATH)
-        _ADVERT_CACHE = ""
-    return _ADVERT_CACHE
-
-
-def render_advert() -> str:
-    """Dump the advert art starting at the top-left. The art was authored
-    for 80x25 so we don't try to center — it wants to land at (1,1)."""
-    ad = load_advert()
-    if not ad:
-        return ""
-    return CLEAR + HOME + ad + RESET
-
-
-def render_replay_prompt(cols: int, rows: int) -> str:
-    """Compact prompt shown after the advert: replay or quit."""
-    lines = [
-        ("", ""),
-        ("\u250c" + "\u2500" * 38 + "\u2510", _C_DIM),
-        ("\u2502       that was second reality        \u2502", _C_WHITE),
-        ("\u2502                                      \u2502", ""),
-        ("\u2502   [ R ]  replay the demo             \u2502", _C_GOLD + _BOLD),
-        ("\u2502   [ Q ]  quit                        \u2502", _C_PINK + _BOLD),
-        ("\u2514" + "\u2500" * 38 + "\u2518", _C_DIM),
-        ("", ""),
-        ("waiting for your choice...", _C_DIM),
-    ]
-    n = len(lines)
-    top = max(1, (rows - n) // 2)
-    out = [CLEAR, HOME]
-    for i, (txt, color) in enumerate(lines):
-        if not txt:
-            continue
-        pad = max(0, (cols - len(txt)) // 2)
-        colored = f"{color}{txt}{RESET}" if color else txt
-        out.append(f"\x1b[{top + i};1H{' ' * pad}{colored}")
+    out.append(RESET)
     return "".join(out)
 
 
@@ -440,8 +398,6 @@ async def key_reader(reader, queue: asyncio.Queue) -> None:
                 await queue.put("QUIT")
             elif ch == " ":
                 await queue.put("SPACE")
-            elif ch in ("r", "R"):
-                await queue.put("REPLAY")
             elif ch in ("\r", "\n"):
                 await queue.put("ENTER")
             # silently ignore everything else
@@ -557,7 +513,7 @@ async def _drain_keys(key_q: asyncio.Queue) -> None:
 
 async def shell(reader, writer) -> None:
     """Per-connection coroutine:
-       welcome → play → advert → [replay or quit] → goodbye"""
+       welcome → play → goodbye (held until keypress or timeout)"""
     global _SESSION_COUNTER
     _SESSION_COUNTER += 1
     session = _SESSION_COUNTER
@@ -609,51 +565,23 @@ async def shell(reader, writer) -> None:
 
         bucket = pick_bucket(cols, rows)
 
-        # --- play / advert / replay loop ---
-        replays = 0
-        while True:
-            status = await _play_once(writer, key_q, peer, bucket, cols, rows, fps)
-            if status in ("QUIT", "DISCONNECT"):
-                return
+        # --- play once ---
+        await _play_once(writer, key_q, peer, bucket, cols, rows, fps)
 
-            # --- 20forbeers.com advert (Option A) ---
-            ad = render_advert()
-            if ad:
-                writer.write(ad)
-                await writer.drain()
-                # Hold the advert, but still honor an immediate QUIT.
-                try:
-                    key = await asyncio.wait_for(
-                        key_q.get(), timeout=DEFAULT_ADVERT_HOLD)
-                    if key in ("QUIT", "DISCONNECT"):
-                        return
-                except asyncio.TimeoutError:
-                    pass
-
-            # --- replay prompt ---
-            writer.write(render_replay_prompt(cols, rows))
+        # --- goodbye / BBS ad: held until keypress or timeout ---
+        try:
+            writer.write(render_goodbye(cols, rows))
             await writer.drain()
-            await _drain_keys(key_q)
-            try:
-                key = await asyncio.wait_for(key_q.get(), timeout=30.0)
-            except asyncio.TimeoutError:
-                return
-            if key == "REPLAY":
-                replays += 1
-                log.info("%s replay #%d", peer, replays)
-                continue
-            return  # any other key → goodbye
+        except Exception:
+            return
+        await _drain_keys(key_q)
+        try:
+            await asyncio.wait_for(key_q.get(), timeout=DEFAULT_GOODBYE_HOLD)
+        except asyncio.TimeoutError:
+            pass
 
     finally:
         reader_task.cancel()
-        try:
-            writer.write(render_goodbye(
-                writer.get_extra_info("cols") or 80,
-                writer.get_extra_info("rows") or 25,
-            ))
-            await writer.drain()
-        except Exception:
-            pass
         try:
             writer.close()
         except Exception:
