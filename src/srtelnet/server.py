@@ -44,6 +44,14 @@ BUCKETS_ORDER = (40, 60, 80, 100, 120, 140, 160, 180, 200)
 # ffmpeg blackdetect puts the last black segment end at 508.274s -> frame 15249.
 # Frames 15249..end are the credit card. Cap playback here by default.
 DEFAULT_MAX_FRAMES = 15249
+# Frame ranges to skip entirely during playback. Each (start, end) removes
+# frames [start, end) from the playback index. Default cuts 11s out of the
+# 15.2s static landscape section at 42.76s-57.97s (ffmpeg freezedetect),
+# centered so ~2.1s of stillness remains on each side of the cut. The demo
+# plays quiet music-only pauses during this stretch which we can't reproduce
+# over telnet, so skipping most of it keeps the viewer engaged without an
+# abrupt splice.
+DEFAULT_SKIPS: list[tuple[int, int]] = [(1346, 1676)]
 
 # ANSI control strings (telnetlib3 accepts str, emits utf-8 on the wire)
 HIDE_CURSOR = "\x1b[?25l"
@@ -68,6 +76,7 @@ class Bucket:
 
 BUCKETS: dict[int, Bucket] = {}
 MAX_FRAMES: int | None = None  # set at startup from CLI
+SKIPS: list[tuple[int, int]] = []  # set at startup from CLI
 
 
 def _parse_frame_lines(raw: str) -> list[str]:
@@ -90,6 +99,15 @@ def load_bucket_index(root: Path, width: int) -> Bucket | None:
         return None
     if MAX_FRAMES is not None and MAX_FRAMES < len(files):
         files = files[:MAX_FRAMES]
+    # Apply skip ranges: drop frames that fall inside any [start, end) range.
+    # Iterate in reverse so each slice keeps earlier indices valid.
+    for start, end in sorted(SKIPS, reverse=True):
+        if start < 0 or end <= start:
+            continue
+        if start >= len(files):
+            continue
+        end = min(end, len(files))
+        del files[start:end]
     first = files[0].read_text(encoding="utf-8", errors="replace")
     height = len(_parse_frame_lines(first))
     log.info("bucket %d indexed: %d frames, %dx%d", width, len(files), width, height)
@@ -403,18 +421,38 @@ def main() -> int:
                     help=f"stop playback at frame N (default {DEFAULT_MAX_FRAMES}, "
                          "trims the trailing credit card off the short bake; "
                          "set 0 to play every baked frame)")
+    ap.add_argument("--skip", action="append", default=None,
+                    metavar="START:END",
+                    help="drop frames [START, END) from playback (can be "
+                         "repeated). Default skips the 11s still landscape "
+                         "section. Pass '--skip none' to disable all skips.")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="debug-level logging")
     args = ap.parse_args()
-
-    global MAX_FRAMES
-    MAX_FRAMES = args.max_frames if args.max_frames > 0 else None
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
+
+    global MAX_FRAMES, SKIPS
+    MAX_FRAMES = args.max_frames if args.max_frames > 0 else None
+
+    if args.skip is None:
+        SKIPS = list(DEFAULT_SKIPS)
+    elif len(args.skip) == 1 and args.skip[0].lower() == "none":
+        SKIPS = []
+    else:
+        SKIPS = []
+        for s in args.skip:
+            try:
+                a, b = s.split(":", 1)
+                SKIPS.append((int(a), int(b)))
+            except ValueError:
+                sys.exit(f"[error] bad --skip value: {s!r} (expected START:END)")
+    if SKIPS:
+        log.info("playback skips: %s", SKIPS)
 
     # FPS is read from env var inside the shell coroutine so the admin can
     # override without code changes. Stash the CLI choice there.

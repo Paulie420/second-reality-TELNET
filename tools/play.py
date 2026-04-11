@@ -57,11 +57,30 @@ def restore_terminal() -> None:
         pass
 
 
-def load_frames(frame_dir: Path, start: int, end: int | None) -> list[bytes]:
-    """Load frame-*.ans files from frame_dir in sorted order, as raw bytes."""
+def load_frames(
+    frame_dir: Path,
+    start: int,
+    end: int | None,
+    skips: list[tuple[int, int]] | None = None,
+    max_frames: int = 0,
+) -> list[bytes]:
+    """Load frame-*.ans files from frame_dir in sorted order, as raw bytes.
+
+    Order of operations matters:
+      1. truncate to max_frames (cuts trailing credit card)
+      2. apply skip ranges (cuts interior still section)
+      3. apply start/end slice (user's debug window)
+    """
     files = sorted(frame_dir.glob("frame-*.ans"))
     if not files:
         sys.exit(f"[error] no frame-*.ans files in {frame_dir}")
+    if max_frames and max_frames < len(files):
+        files = files[:max_frames]
+    if skips:
+        for s_start, s_end in sorted(skips, reverse=True):
+            if s_start < 0 or s_end <= s_start or s_start >= len(files):
+                continue
+            del files[s_start:min(s_end, len(files))]
     if end is None:
         end = len(files)
     files = files[start:end]
@@ -139,7 +158,34 @@ def main() -> int:
     ap.add_argument("--loop", action="store_true", help="loop forever instead of stopping at end")
     ap.add_argument("--start", type=int, default=0, help="start at frame index N (default 0)")
     ap.add_argument("--end", type=int, default=None, help="stop at frame index N (default: last)")
+    ap.add_argument(
+        "--skip", action="append", default=None, metavar="START:END",
+        help="drop frames [START, END) from playback (can be repeated). "
+             "Default skips the 11s still landscape section (1346:1676). "
+             "Pass '--skip none' to disable all skips.",
+    )
+    ap.add_argument(
+        "--max-frames", type=int, default=15249,
+        help="stop at frame N of the original bake (default 15249, trims "
+             "the trailing credit card). 0 to play every baked frame.",
+    )
     args = ap.parse_args()
+
+    # Default skip matches srtelnet.server: 11s cut centered in the 15.2s
+    # static landscape freeze (~42.76s to 57.97s in the short webm).
+    default_skips: list[tuple[int, int]] = [(1346, 1676)]
+    if args.skip is None:
+        skips = default_skips
+    elif len(args.skip) == 1 and args.skip[0].lower() == "none":
+        skips = []
+    else:
+        skips = []
+        for s in args.skip:
+            try:
+                a, b = s.split(":", 1)
+                skips.append((int(a), int(b)))
+            except ValueError:
+                sys.exit(f"[error] bad --skip value: {s!r} (expected START:END)")
 
     if not args.frame_dir.is_dir():
         sys.exit(f"[error] not a directory: {args.frame_dir}")
@@ -153,7 +199,13 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _sig_handler)
 
     try:
-        frames = load_frames(args.frame_dir, args.start, args.end)
+        frames = load_frames(
+            args.frame_dir,
+            args.start,
+            args.end,
+            skips=skips,
+            max_frames=args.max_frames,
+        )
         play(frames, args.fps, args.loop)
     finally:
         restore_terminal()
