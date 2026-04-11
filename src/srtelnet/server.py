@@ -66,7 +66,8 @@ DEFAULT_ADVERT_HOLD = 4.0
 # of squashing chafa output into an unreadable mess.
 MIN_COLS = 40
 MIN_ROWS = 20
-# Path to the 20forbeers.com advert (UTF-8 decoded from CP437 ANSI art).
+# Path to the 20forbeers.com advert (truecolor ANSI, chafa-rendered from
+# the source PNG so it uses the same pipeline as the video frames).
 # Resolved relative to the package at import time.
 ADVERT_PATH = Path(__file__).resolve().parent.parent.parent / "assets" / "20forbeers_advert.ans"
 
@@ -333,7 +334,7 @@ _ADVERT_CACHE: str | None = None
 
 
 def load_advert() -> str:
-    """Load the UTF-8 ANSI advert from assets/. Cached after first read."""
+    """Load the truecolor ANSI advert from assets/. Cached after first read."""
     global _ADVERT_CACHE
     if _ADVERT_CACHE is not None:
         return _ADVERT_CACHE
