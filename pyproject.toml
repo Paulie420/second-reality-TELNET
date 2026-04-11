@@ -1,0 +1,44 @@
+[project]
+name = "srtelnet"
+version = "0.1.0"
+description = "Stream Future Crew's Second Reality (1993) as pre-rendered ANSI frames over telnet."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Unlicense" }
+authors = [
+    { name = "Paul Lee" },
+]
+keywords = ["telnet", "demoscene", "ansi", "chafa", "second-reality", "blessed", "telnetlib3"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "License :: Public Domain",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Artistic Software",
+    "Topic :: Terminals",
+    "Topic :: Terminals :: Telnet",
+]
+dependencies = [
+    "blessed>=1.20",
+    "telnetlib3>=2.0.4",
+]
+
+[project.scripts]
+srtelnet-server = "srtelnet.server:main"
+
+[project.urls]
+Homepage = "https://github.com/Paulie420/second-reality-TELNET"
+Reference = "https://jeffquast.com/network23.tar.gz"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

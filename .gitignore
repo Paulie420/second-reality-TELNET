@@ -1,0 +1,50 @@
+# source video files (user-provided, large, not for distribution)
+*.webm
+*.mp4
+*.mkv
+*.mov
+*.avi
+
+# baked frame output — generated on the Mac, scp'd to the LXC
+frames/
+
+# jquast's network23 reference tarball + extracted tree (~721 MB, public domain
+# but way too large to version; keep locally for reference only)
+reference/
+
+# python virtualenvs
+.venv/
+venv/
+ENV/
+env/
+
+# python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# editor / OS junk
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# logs and runtime
+*.log
+logs/
+
+# local secrets / env
+.env
+.envrc
+
+# claude code / editor agent settings
+.claude/
