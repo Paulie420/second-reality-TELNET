@@ -619,6 +619,36 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> str:
     skipped = 0
 
     while i < n_frames:
+        # Live NAWS resize handling. telnetlib3 updates the extra_info dict
+        # whenever a fresh NAWS subnegotiation arrives, so we just re-read
+        # it each iteration. If the client resized their terminal, we may
+        # need to switch buckets and/or re-center on the new window.
+        new_cols = writer.get_extra_info("cols") or cols
+        new_rows = writer.get_extra_info("rows") or rows
+        if new_cols != cols or new_rows != rows:
+            new_bucket = pick_bucket(new_cols, new_rows)
+            log.info(
+                "%s resize %dx%d->%dx%d  bucket %d->%d",
+                peer, cols, rows, new_cols, new_rows,
+                bucket.width, new_bucket.width,
+            )
+            cols, rows = new_cols, new_rows
+            if new_bucket is not bucket:
+                bucket = new_bucket
+                n_frames = len(bucket.paths)
+                if i >= n_frames:
+                    i = n_frames - 1
+            top = max(0, (rows - bucket.height) // 2)
+            left = max(0, (cols - bucket.width) // 2)
+            # Old frame leaves stale cells around the edges of the new
+            # bucket. Wipe the screen so the next render is clean.
+            writer.write(CLEAR + HOME)
+            try:
+                await _drain_bounded(writer)
+            except (ConnectionResetError, BrokenPipeError):
+                return "DISCONNECT"
+            target = loop.time()  # resync the frame clock after the wipe
+
         resync = False
         while not key_q.empty():
             try:
