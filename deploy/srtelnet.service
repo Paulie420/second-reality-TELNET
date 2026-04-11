@@ -20,15 +20,11 @@ RestartSec=3
 StandardOutput=journal
 StandardError=journal
 
-# Basic hardening — safe for an unprivileged LXC, nothing here needs root.
+# Minimal hardening — unprivileged LXCs can't set up mount/cgroup/kernel
+# namespaces, so PrivateTmp/ProtectSystem/ProtectHome/Protect{Kernel,Cgroup}*
+# all fail with status=226/NAMESPACE. NoNewPrivileges is a simple prctl flag
+# with no namespace requirements, so we keep it.
 NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ReadWritePaths=/home/paulie420/second-reality-TELNET
-ProtectHome=read-only
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
 
 [Install]
 WantedBy=multi-user.target
