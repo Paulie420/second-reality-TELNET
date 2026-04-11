@@ -52,6 +52,10 @@ DEFAULT_MAX_FRAMES = 15249
 # over telnet, so skipping most of it keeps the viewer engaged without an
 # abrupt splice.
 DEFAULT_SKIPS: list[tuple[int, int]] = [(1346, 1676)]
+# After the last frame, hold the final image on screen for this many seconds
+# before transitioning to the goodbye message. Compensates for the fact that
+# MAX_FRAMES = 15249 stops a hair before the video technically ends.
+DEFAULT_END_HOLD = 0.5
 
 # ANSI control strings (telnetlib3 accepts str, emits utf-8 on the wire)
 HIDE_CURSOR = "\x1b[?25l"
@@ -384,6 +388,13 @@ async def shell(reader, writer) -> None:
             target += frame_interval
 
         log.info("%s playback complete (skipped=%d of %d)", peer, skipped, n_frames)
+
+        # Hold the last frame for a beat before the goodbye transition so the
+        # demo doesn't feel like it snaps to black.
+        try:
+            await asyncio.sleep(DEFAULT_END_HOLD)
+        except asyncio.CancelledError:
+            pass
 
     finally:
         reader_task.cancel()

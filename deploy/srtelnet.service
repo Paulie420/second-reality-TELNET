@@ -1,0 +1,34 @@
+[Unit]
+Description=second-reality-TELNET server (stream Second Reality over telnet)
+Documentation=https://github.com/Paulie420/second-reality-TELNET
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=paulie420
+Group=paulie420
+WorkingDirectory=/home/paulie420/second-reality-TELNET
+# The venv python has cap_net_bind_service set so it can bind low ports
+# without needing sudo. Change --port to 23 if you want standard telnet.
+ExecStart=/home/paulie420/second-reality-TELNET/.venv/bin/python -m srtelnet.server \
+    --port 2323 \
+    --frames /home/paulie420/second-reality-TELNET/frames \
+    --fps 30
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+# Basic hardening — safe for an unprivileged LXC, nothing here needs root.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/paulie420/second-reality-TELNET
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target
