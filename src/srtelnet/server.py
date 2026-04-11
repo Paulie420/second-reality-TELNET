@@ -164,7 +164,9 @@ def render_frame_at(lines: list[str], top: int, left: int) -> str:
 # ---------------------------------------------------------------- welcome
 # Figlet "slant" font, pre-rendered. Stored as raw strings so we don't need
 # figlet on the host. SECOND is 38 cols wide, REALITY is 45 cols wide — the
-# two blocks are centered independently, so the shape looks natural.
+# two blocks are centered independently, so the shape looks natural. TELNET
+# lives in the subtitle band instead of the figlet stack so the whole
+# welcome screen fits on a classic 80x25 terminal.
 _FIGLET_SECOND = [
     r"   _____ ________________  _   ______ ",
     r"  / ___// ____/ ____/ __ \/ | / / __ \ ",
@@ -178,13 +180,6 @@ _FIGLET_REALITY = [
     r"  / /_/ / __/ / /| | / /    / /  / /    \  / ",
     r" / _, _/ /___/ ___ |/ /____/ /  / /     / /  ",
     r"/_/ |_/_____/_/  |_/_____/___/ /_/     /_/   ",
-]
-_FIGLET_TELNET = [
-    r"  ______________    _   ______________",
-    r" /_  __/ ____/ /   / | / / ____/_  __/",
-    r"  / / / __/ / /   /  |/ / __/   / /   ",
-    r" / / / /___/ /___/ /|  / /___  / /    ",
-    r"/_/ /_____/_____/_/ |_/_____/ /_/     ",
 ]
 
 # Truecolor helpers. Modern terminals speak 24-bit; 256-color and 16-color
@@ -211,8 +206,9 @@ _BLINK    = "\x1b[5m"
 
 
 def render_welcome(cols: int, rows: int) -> str:
-    """Render a BBS-style truecolor ANSI welcome screen with figlet banner,
-    fire gradient, box-drawing borders, and the credits/controls block."""
+    """Render a BBS-style truecolor ANSI welcome screen. Designed to fit
+    exactly on an 80x25 terminal with everything visible — no scroll, no
+    clipping. Taller terminals just get extra top/bottom margin."""
     raw: list[str] = []     # plaintext, for centering math
     col: list[str] = []     # colored, for output
 
@@ -223,50 +219,39 @@ def render_welcome(cols: int, rows: int) -> str:
     # Pad each figlet block to a uniform width so all its lines center together
     s_w = max(len(l) for l in _FIGLET_SECOND)
     r_w = max(len(l) for l in _FIGLET_REALITY)
-    t_w = max(len(l) for l in _FIGLET_TELNET)
     second = [l.ljust(s_w) for l in _FIGLET_SECOND]
     reality = [l.ljust(r_w) for l in _FIGLET_REALITY]
-    telnet = [l.ljust(t_w) for l in _FIGLET_TELNET]
 
-    # --- figlet banner with fire gradient (SECOND / REALITY / TELNET stack)
-    add("")
+    # --- figlet banner: SECOND / REALITY in fire gradient (10 rows)
     for i, ln in enumerate(second):
         add(ln, _BOLD + _C_FIRE[i % len(_C_FIRE)])
     for i, ln in enumerate(reality):
         add(ln, _BOLD + _C_FIRE[(i + 2) % len(_C_FIRE)])
-    for i, ln in enumerate(telnet):
-        add(ln, _BOLD + _C_FIRE[(i + 4) % len(_C_FIRE)])
-    add("")
 
-    # --- subtitle band
+    # --- subtitle band (3 rows, with TELNET EDITION in the text since it
+    # doesn't fit as a third figlet block on 80x25)
     bar = "\u2593\u2592\u2591" + "\u2550" * 48 + "\u2591\u2592\u2593"
     add(bar, _C_PURPLE)
-    add("\u00bb 1993  \u00b7  FUTURE CREW  \u00b7  telnet edition  \u00ab", _C_GOLD + _BOLD)
+    add("\u00bb FUTURE CREW  \u00b7  1993  \u00b7  TELNET EDITION \u00ab", _C_GOLD + _BOLD)
     add(bar, _C_PURPLE)
-    add("")
 
-    # --- stats
+    # --- stats (1 row)
     add("[ 15,244 frames  \u00b7  30 fps  \u00b7  truecolor ANSI  \u00b7  9 width buckets ]", _C_CYAN)
-    add("")
 
-    # --- controls box — all rows 44 cells wide (2 corners + 42 interior)
+    # --- one-line credits (1 row)
+    add("thanks: Future Crew  \u00b7  Jeff Quast  \u00b7  Hans Petter Jansson", _C_DIM)
+
+    # --- controls box — all rows 44 cells wide (2 corners + 42 interior), 5 rows
     add("\u250c" + "\u2500" * 16 + " CONTROLS " + "\u2500" * 16 + "\u2510", _C_DIM)
     add("\u2502   q  or  Ctrl-C     quit                 \u2502", _C_WHITE)
     add("\u2502   space             pause / resume       \u2502", _C_WHITE)
     add("\u2502   \u2190 / \u2192             seek -/+ 5 seconds   \u2502", _C_WHITE)
     add("\u2514" + "\u2500" * 42 + "\u2518", _C_DIM)
-    add("")
 
-    # --- credits / shouts
-    add("shouts to:", _C_PINK + _BOLD)
-    add("  Future Crew           \u2014 the demo itself (1993)", _C_DIM)
-    add("  Jeff Quast            \u2014 telnetlib3 + network23/1984.ws template", _C_DIM)
-    add("  Hans Petter Jansson   \u2014 chafa, the image\u2192ANSI renderer", _C_DIM)
-    add("")
+    # --- signoff + prompt (2 rows)
     add("streamed by paulie420  \u00b7  20forbeers.com", _C_GREEN)
-    add("")
     add(">>>   PRESS ANY KEY TO JACK IN   <<<", _BOLD + _BLINK + _C_PINK)
-    add("")
+    # Total: 10 + 3 + 1 + 1 + 5 + 2 = 22 rows. Fits in 80x25 with room.
 
     # Note: the controls-box border and subtitle bar contain unicode
     # box-drawing / block chars, which len() counts as single cells — that
