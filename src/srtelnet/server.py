@@ -338,6 +338,10 @@ def render_goodbye(cols: int, rows: int) -> str:
         pad = max(0, (cols - len(r_line)) // 2)
         out.append(f"\x1b[{top + i};1H{' ' * pad}{c_line}")
     out.append(RESET)
+    # Park the cursor a couple rows below NO CARRIER and emit blank lines
+    # so the client's "Connection closed by foreign host." message lands
+    # with breathing room instead of jammed right under NO CARRIER.
+    out.append(f"\x1b[{min(rows, top + n + 1)};1H\r\n\r\n")
     return "".join(out)
 
 
