@@ -250,8 +250,10 @@ def _build_banner() -> list[tuple[str, str]]:
 
     SECOND and REALITY are joined with a single space on the top 4 rows.
     TELNET sits on the bottom 4 rows, horizontally centered under the
-    SECOND REALITY block so the whole thing reads like a centered logo.
-    The caller centers the entire block inside the terminal."""
+    SECOND REALITY block by visual bounding box (not char count) so
+    asymmetric trailing whitespace in the figlets doesn't visually pull
+    TELNET off-center. The caller centers the entire block inside the
+    terminal."""
     s_w = max(len(l) for l in _FIGLET_SECOND)
     r_w = max(len(l) for l in _FIGLET_REALITY)
     t_w = max(len(l) for l in _FIGLET_TELNET)
@@ -259,19 +261,36 @@ def _build_banner() -> list[tuple[str, str]]:
     reality = [l.ljust(r_w) for l in _FIGLET_REALITY]
     telnet  = [l.ljust(t_w) for l in _FIGLET_TELNET]
 
-    banner_w = s_w + 1 + r_w                      # top row width
-    telnet_pad = max(0, (banner_w - t_w) // 2)    # center TELNET
+    banner_w = s_w + 1 + r_w                 # top row width (char-level)
+    top_rows = [f"{second[i]} {reality[i]}".ljust(banner_w) for i in range(4)]
+    bot_rows = telnet
+
+    # Visual bounding box of each block: leftmost col that holds any
+    # non-whitespace, and rightmost col of any non-whitespace. This
+    # ignores figlet trailing whitespace, which is what the eye does.
+    def _vspan(lines):
+        left = min(len(l) - len(l.lstrip()) for l in lines)
+        right = max(len(l.rstrip()) for l in lines)
+        return left, right
+
+    t_left, t_right = _vspan(top_rows)            # top visual box
+    b_left, b_right = _vspan(bot_rows)            # telnet visual box
+    # pad + b_left .. pad + b_right should share its midpoint with the
+    # top block. Solve for pad; round up on .5 to bias against the side
+    # with more trailing whitespace (which is always the right side for
+    # slant figlets, so biasing right cancels the drift).
+    telnet_pad = max(
+        0,
+        ((t_left + t_right) - (b_left + b_right) + 1) // 2,
+    )
 
     rows_out: list[tuple[str, str]] = []
-    # Top half: SECOND + space + REALITY, each padded so every top row is
-    # exactly banner_w wide (important for consistent centering).
+    # Top half: SECOND + space + REALITY, every row padded to banner_w.
     for i in range(4):
-        line = f"{second[i]} {reality[i]}".ljust(banner_w)
-        rows_out.append((line, _BOLD + _C_FIRE[i % len(_C_FIRE)]))
-    # Bottom half: TELNET, centered inside banner_w so it sits under the
-    # midpoint of SECOND REALITY.
+        rows_out.append((top_rows[i], _BOLD + _C_FIRE[i % len(_C_FIRE)]))
+    # Bottom half: TELNET, offset so its visual midpoint matches the top.
     for i in range(4):
-        line = (" " * telnet_pad + telnet[i]).ljust(banner_w)
+        line = (" " * telnet_pad + bot_rows[i]).ljust(banner_w)
         rows_out.append((line, _BOLD + _C_FIRE[(i + 2) % len(_C_FIRE)]))
     return rows_out
 
