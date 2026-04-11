@@ -179,6 +179,13 @@ _FIGLET_REALITY = [
     r" / _, _/ /___/ ___ |/ /____/ /  / /     / /  ",
     r"/_/ |_/_____/_/  |_/_____/___/ /_/     /_/   ",
 ]
+_FIGLET_TELNET = [
+    r"  ______________    _   ______________",
+    r" /_  __/ ____/ /   / | / / ____/_  __/",
+    r"  / / / __/ / /   /  |/ / __/   / /   ",
+    r" / / / /___/ /___/ /|  / /___  / /    ",
+    r"/_/ /_____/_____/_/ |_/_____/ /_/     ",
+]
 
 # Truecolor helpers. Modern terminals speak 24-bit; 256-color and 16-color
 # clients will still map these to their nearest palette entry.
@@ -216,15 +223,19 @@ def render_welcome(cols: int, rows: int) -> str:
     # Pad each figlet block to a uniform width so all its lines center together
     s_w = max(len(l) for l in _FIGLET_SECOND)
     r_w = max(len(l) for l in _FIGLET_REALITY)
+    t_w = max(len(l) for l in _FIGLET_TELNET)
     second = [l.ljust(s_w) for l in _FIGLET_SECOND]
     reality = [l.ljust(r_w) for l in _FIGLET_REALITY]
+    telnet = [l.ljust(t_w) for l in _FIGLET_TELNET]
 
-    # --- figlet banner with fire gradient
+    # --- figlet banner with fire gradient (SECOND / REALITY / TELNET stack)
     add("")
     for i, ln in enumerate(second):
         add(ln, _BOLD + _C_FIRE[i % len(_C_FIRE)])
     for i, ln in enumerate(reality):
         add(ln, _BOLD + _C_FIRE[(i + 2) % len(_C_FIRE)])
+    for i, ln in enumerate(telnet):
+        add(ln, _BOLD + _C_FIRE[(i + 4) % len(_C_FIRE)])
     add("")
 
     # --- subtitle band
@@ -235,7 +246,7 @@ def render_welcome(cols: int, rows: int) -> str:
     add("")
 
     # --- stats
-    add("[ 15,249 frames  \u00b7  30 fps  \u00b7  truecolor ANSI  \u00b7  9 width buckets ]", _C_CYAN)
+    add("[ 15,244 frames  \u00b7  30 fps  \u00b7  truecolor ANSI  \u00b7  9 width buckets ]", _C_CYAN)
     add("")
 
     # --- controls box — all rows 44 cells wide (2 corners + 42 interior)
