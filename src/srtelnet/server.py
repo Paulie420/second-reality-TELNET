@@ -228,6 +228,8 @@ def render_welcome(cols: int, rows: int) -> str:
     for i, ln in enumerate(reality):
         add(ln, _BOLD + _C_FIRE[(i + 2) % len(_C_FIRE)])
 
+    add("")  # spacer between banner and subtitle
+
     # --- subtitle band (3 rows, with TELNET EDITION in the text since it
     # doesn't fit as a third figlet block on 80x25)
     bar = "\u2593\u2592\u2591" + "\u2550" * 48 + "\u2591\u2592\u2593"
@@ -241,6 +243,8 @@ def render_welcome(cols: int, rows: int) -> str:
     # --- one-line credits (1 row)
     add("thanks: Future Crew  \u00b7  Jeff Quast  \u00b7  Hans Petter Jansson", _C_DIM)
 
+    add("")  # spacer between info and controls
+
     # --- controls box — all rows 44 cells wide (2 corners + 42 interior), 5 rows
     add("\u250c" + "\u2500" * 16 + " CONTROLS " + "\u2500" * 16 + "\u2510", _C_DIM)
     add("\u2502   q  or  Ctrl-C     quit                 \u2502", _C_WHITE)
@@ -248,10 +252,12 @@ def render_welcome(cols: int, rows: int) -> str:
     add("\u2502   \u2190 / \u2192             seek -/+ 5 seconds   \u2502", _C_WHITE)
     add("\u2514" + "\u2500" * 42 + "\u2518", _C_DIM)
 
+    add("")  # spacer between controls and signoff
+
     # --- signoff + prompt (2 rows)
     add("streamed by paulie420  \u00b7  20forbeers.com", _C_GREEN)
     add(">>>   PRESS ANY KEY TO JACK IN   <<<", _BOLD + _BLINK + _C_PINK)
-    # Total: 10 + 3 + 1 + 1 + 5 + 2 = 22 rows. Fits in 80x25 with room.
+    # Total: 10 + 1 + 3 + 1 + 1 + 1 + 5 + 1 + 2 = 25 rows. Exactly 80x25.
 
     # Note: the controls-box border and subtitle bar contain unicode
     # box-drawing / block chars, which len() counts as single cells — that
