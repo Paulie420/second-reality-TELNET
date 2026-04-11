@@ -165,9 +165,11 @@ def main() -> int:
              "Pass '--skip none' to disable all skips.",
     )
     ap.add_argument(
-        "--max-frames", type=int, default=15249,
-        help="stop at frame N of the original bake (default 15249, trims "
-             "the trailing credit card). 0 to play every baked frame.",
+        "--max-frames", type=int, default=15244,
+        help="stop at frame N of the original bake (default 15244, trims "
+             "the trailing credit card with a 5-frame safety margin so no "
+             "ghost text leaks through the end-hold). 0 to play every "
+             "baked frame.",
     )
     args = ap.parse_args()
 
