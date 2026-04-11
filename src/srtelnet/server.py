@@ -245,13 +245,13 @@ def _build_banner() -> list[tuple[str, str]]:
 
     Layout:
 
-        SECOND REALITY
+            SECOND REALITY
                 TELNET
 
     SECOND and REALITY are joined with a single space on the top 4 rows.
-    TELNET sits on the bottom 4 rows, right-aligned under REALITY so the
-    whole thing reads like a logo with a subtitle. The caller centers the
-    entire block horizontally."""
+    TELNET sits on the bottom 4 rows, horizontally centered under the
+    SECOND REALITY block so the whole thing reads like a centered logo.
+    The caller centers the entire block inside the terminal."""
     s_w = max(len(l) for l in _FIGLET_SECOND)
     r_w = max(len(l) for l in _FIGLET_REALITY)
     t_w = max(len(l) for l in _FIGLET_TELNET)
@@ -259,8 +259,8 @@ def _build_banner() -> list[tuple[str, str]]:
     reality = [l.ljust(r_w) for l in _FIGLET_REALITY]
     telnet  = [l.ljust(t_w) for l in _FIGLET_TELNET]
 
-    banner_w = s_w + 1 + r_w                 # top row width
-    telnet_pad = max(0, banner_w - t_w)      # right-align TELNET
+    banner_w = s_w + 1 + r_w                      # top row width
+    telnet_pad = max(0, (banner_w - t_w) // 2)    # center TELNET
 
     rows_out: list[tuple[str, str]] = []
     # Top half: SECOND + space + REALITY, each padded so every top row is
@@ -268,7 +268,8 @@ def _build_banner() -> list[tuple[str, str]]:
     for i in range(4):
         line = f"{second[i]} {reality[i]}".ljust(banner_w)
         rows_out.append((line, _BOLD + _C_FIRE[i % len(_C_FIRE)]))
-    # Bottom half: TELNET, indented so its right edge matches REALITY's.
+    # Bottom half: TELNET, centered inside banner_w so it sits under the
+    # midpoint of SECOND REALITY.
     for i in range(4):
         line = (" " * telnet_pad + telnet[i]).ljust(banner_w)
         rows_out.append((line, _BOLD + _C_FIRE[(i + 2) % len(_C_FIRE)]))
