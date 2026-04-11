@@ -159,47 +159,111 @@ def render_frame_at(lines: list[str], top: int, left: int) -> str:
 
 
 # ---------------------------------------------------------------- welcome
+# Figlet "slant" font, pre-rendered. Stored as raw strings so we don't need
+# figlet on the host. SECOND is 38 cols wide, REALITY is 45 cols wide — the
+# two blocks are centered independently, so the shape looks natural.
+_FIGLET_SECOND = [
+    r"   _____ ________________  _   ______ ",
+    r"  / ___// ____/ ____/ __ \/ | / / __ \ ",
+    r"  \__ \/ __/ / /   / / / /  |/ / / / /",
+    r" ___/ / /___/ /___/ /_/ / /|  / /_/ / ",
+    r"/____/_____/\____/\____/_/ |_/_____/  ",
+]
+_FIGLET_REALITY = [
+    r"    ____  _________    __    ____________  __",
+    r"   / __ \/ ____/   |  / /   /  _/_  __/\ \/ /",
+    r"  / /_/ / __/ / /| | / /    / /  / /    \  / ",
+    r" / _, _/ /___/ ___ |/ /____/ /  / /     / /  ",
+    r"/_/ |_/_____/_/  |_/_____/___/ /_/     /_/   ",
+]
+
+# Truecolor helpers. Modern terminals speak 24-bit; 256-color and 16-color
+# clients will still map these to their nearest palette entry.
+def _fg(r: int, g: int, b: int) -> str:
+    return f"\x1b[38;2;{r};{g};{b}m"
+
+_C_FIRE = [
+    _fg(255, 40, 40),    # deep red
+    _fg(255, 90, 30),    # orange-red
+    _fg(255, 140, 20),   # orange
+    _fg(255, 180, 30),   # amber
+    _fg(255, 220, 60),   # gold
+]
+_C_CYAN   = _fg(0, 220, 255)
+_C_PINK   = _fg(255, 80, 200)
+_C_PURPLE = _fg(180, 100, 255)
+_C_GOLD   = _fg(255, 200, 80)
+_C_GREEN  = _fg(120, 255, 140)
+_C_WHITE  = _fg(235, 235, 235)
+_C_DIM    = _fg(130, 130, 150)
+_BOLD     = "\x1b[1m"
+_BLINK    = "\x1b[5m"
+
+
 def render_welcome(cols: int, rows: int) -> str:
-    """Center a welcome/credits block on screen. Plain ASCII box so it
-    renders in any terminal."""
-    lines = [
-        "",
-        "+------------------------------------------------------------+",
-        "|                                                            |",
-        "|         S E C O N D   R E A L I T Y   (1993)               |",
-        "|                                                            |",
-        "|               by  F U T U R E   C R E W                    |",
-        "|                                                            |",
-        "|       streamed over telnet by paulie420 / 20forbeers       |",
-        "|                                                            |",
-        "+------------------------------------------------------------+",
-        "",
-        "This is the legendary Second Reality demo, rendered frame by",
-        "frame into truecolor ANSI and streamed to your terminal at 30 fps.",
-        "",
-        "No audio -- telnet has no ears. Some quiet stretches are expected:",
-        "they're music-only passages in the original demo.",
-        "",
-        "Controls during playback:",
-        "    q  or  Ctrl-C     quit",
-        "    space             pause / resume",
-        "    left / right      seek -/+ 5 seconds",
-        "",
-        "Credits:",
-        "    Future Crew -- the demo itself (1993)",
-        "    Jeff Quast  -- telnetlib3, blessed, and the network23/1984.ws",
-        "                   architectural template this server copies",
-        "    Hans Petter Jansson -- chafa, the image-to-ANSI renderer",
-        "",
-        "Press any key to begin...",
-        "",
-    ]
-    n = len(lines)
+    """Render a BBS-style truecolor ANSI welcome screen with figlet banner,
+    fire gradient, box-drawing borders, and the credits/controls block."""
+    raw: list[str] = []     # plaintext, for centering math
+    col: list[str] = []     # colored, for output
+
+    def add(line: str, color: str = "") -> None:
+        raw.append(line)
+        col.append(f"{color}{line}{RESET}" if color else line)
+
+    # Pad each figlet block to a uniform width so all its lines center together
+    s_w = max(len(l) for l in _FIGLET_SECOND)
+    r_w = max(len(l) for l in _FIGLET_REALITY)
+    second = [l.ljust(s_w) for l in _FIGLET_SECOND]
+    reality = [l.ljust(r_w) for l in _FIGLET_REALITY]
+
+    # --- figlet banner with fire gradient
+    add("")
+    for i, ln in enumerate(second):
+        add(ln, _BOLD + _C_FIRE[i % len(_C_FIRE)])
+    for i, ln in enumerate(reality):
+        add(ln, _BOLD + _C_FIRE[(i + 2) % len(_C_FIRE)])
+    add("")
+
+    # --- subtitle band
+    bar = "\u2593\u2592\u2591" + "\u2550" * 48 + "\u2591\u2592\u2593"
+    add(bar, _C_PURPLE)
+    add("\u00bb 1993  \u00b7  FUTURE CREW  \u00b7  telnet edition  \u00ab", _C_GOLD + _BOLD)
+    add(bar, _C_PURPLE)
+    add("")
+
+    # --- stats
+    add("[ 15,249 frames  \u00b7  30 fps  \u00b7  truecolor ANSI  \u00b7  9 width buckets ]", _C_CYAN)
+    add("")
+
+    # --- controls box — all rows 44 cells wide (2 corners + 42 interior)
+    add("\u250c" + "\u2500" * 16 + " CONTROLS " + "\u2500" * 16 + "\u2510", _C_DIM)
+    add("\u2502   q  or  Ctrl-C     quit                 \u2502", _C_WHITE)
+    add("\u2502   space             pause / resume       \u2502", _C_WHITE)
+    add("\u2502   \u2190 / \u2192             seek -/+ 5 seconds   \u2502", _C_WHITE)
+    add("\u2514" + "\u2500" * 42 + "\u2518", _C_DIM)
+    add("")
+
+    # --- credits / shouts
+    add("shouts to:", _C_PINK + _BOLD)
+    add("  Future Crew           \u2014 the demo itself (1993)", _C_DIM)
+    add("  Jeff Quast            \u2014 telnetlib3 + network23/1984.ws template", _C_DIM)
+    add("  Hans Petter Jansson   \u2014 chafa, the image\u2192ANSI renderer", _C_DIM)
+    add("")
+    add("streamed by paulie420  \u00b7  20forbeers.com", _C_GREEN)
+    add("")
+    add(">>>   PRESS ANY KEY TO JACK IN   <<<", _BOLD + _BLINK + _C_PINK)
+    add("")
+
+    # Note: the controls-box border and subtitle bar contain unicode
+    # box-drawing / block chars, which len() counts as single cells — that
+    # matches how a monospace terminal renders them, so centering is correct.
+    n = len(raw)
     top = max(0, (rows - n) // 2)
     out = [HOME, CLEAR]
-    for i, line in enumerate(lines):
-        pad = max(0, (cols - len(line)) // 2)
-        out.append(f"\x1b[{top + i + 1};1H{' ' * pad}{line}")
+    for i, (r_line, c_line) in enumerate(zip(raw, col)):
+        pad = max(0, (cols - len(r_line)) // 2)
+        out.append(f"\x1b[{top + i + 1};1H{' ' * pad}{c_line}")
+    out.append(RESET)
     return "".join(out)
 
 
