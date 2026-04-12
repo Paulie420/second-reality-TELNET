@@ -43,7 +43,7 @@ import time
 from pathlib import Path
 
 DEFAULT_WIDTHS = (40, 60, 80, 100, 120, 140, 160, 180, 200)
-DEFAULT_FPS = 20
+DEFAULT_FPS = 30
 DEFAULT_CELL_ASPECT = 2.0  # terminal cells are ~2x taller than wide
 DEFAULT_SYMBOLS = "block+border+space"  # matches 1984.ws visual style
 
@@ -137,7 +137,7 @@ def bake_one(job: tuple[Path, Path, int, int, str]) -> str:
                 "chafa",
                 "--format", "symbols",
                 "--symbols", symbols,
-                "-c", "256",
+                "-c", "full",
                 "--size", f"{width}x{height}",
                 str(png),
             ],
