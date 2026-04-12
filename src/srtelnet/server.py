@@ -102,13 +102,17 @@ log = logging.getLogger("srtelnet")
 
 # ---------------------------------------------------------------- bucket data
 class Bucket:
-    """One width bucket, indexed but not preloaded. Frames are read on demand."""
-    __slots__ = ("width", "height", "paths")
+    """One width bucket, indexed on startup. Frames are lazily parsed and
+    cached on first read — after one play-through, subsequent reads (from
+    this or any other connection) return the same in-memory tuple of rows
+    without touching the filesystem or re-parsing UTF-8."""
+    __slots__ = ("width", "height", "paths", "cache")
 
     def __init__(self, width: int, height: int, paths: list[Path]):
         self.width = width
         self.height = height
         self.paths = paths
+        self.cache: list[tuple[str, ...] | None] = [None] * len(paths)
 
 
 BUCKETS: dict[int, Bucket] = {}
@@ -175,14 +179,22 @@ def pick_bucket(cols: int, rows: int) -> Bucket:
     return min(BUCKETS.values(), key=lambda b: b.width)
 
 
-def read_frame(bucket: Bucket, index: int) -> list[str]:
-    """Read one frame from disk and return its row list."""
+def read_frame(bucket: Bucket, index: int) -> tuple[str, ...]:
+    """Return the row tuple for frame `index`. Parses and caches on first
+    hit, returns the cached tuple on every subsequent call. All concurrent
+    connections playing the same bucket share the same immutable tuples,
+    so memory cost is per-bucket, not per-connection."""
+    cached = bucket.cache[index]
+    if cached is not None:
+        return cached
     raw = bucket.paths[index].read_text(encoding="utf-8", errors="replace")
-    return _parse_frame_lines(raw)
+    lines = tuple(_parse_frame_lines(raw))
+    bucket.cache[index] = lines
+    return lines
 
 
 # ---------------------------------------------------------------- rendering
-def render_frame_at(lines: list[str], top: int, left: int) -> str:
+def render_frame_at(lines: tuple[str, ...] | list[str], top: int, left: int) -> str:
     """Wrap a frame's rows with per-line cursor-move escapes so it lands at
     (top, left) regardless of whatever else is on the client's screen."""
     parts: list[str] = []
@@ -893,6 +905,16 @@ def main() -> int:
     log.info("lifetime counter: %d (from %s)", _LIFETIME_COUNTER, _COUNTER_PATH)
 
     load_all_buckets(args.frames)
+
+    # Prefer uvloop if it's installed — drop-in replacement that runs the
+    # asyncio event loop on libuv and is typically 2-4x faster than the
+    # stock loop. Safe to skip if the module isn't there.
+    try:
+        import uvloop  # type: ignore
+        uvloop.install()
+        log.info("uvloop active")
+    except ImportError:
+        log.info("uvloop not available, using stock asyncio loop")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
