@@ -5,8 +5,11 @@
 *.mov
 *.avi
 
-# baked frame output — generated on the Mac, scp'd to the LXC
+# baked frame output — generated on the workstation, scp'd to the LXC
 frames/
+frames-20fps/
+frames-30fps/
+archives/
 
 # jquast's network23 reference tarball + extracted tree (~721 MB, public domain
 # but way too large to version; keep locally for reference only)

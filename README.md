@@ -46,32 +46,52 @@ This project owes its existence to two things:
 ## How it works
 
 1. **Bake.** `tools/bake_frames.py` runs the source video through
-   [`ffmpeg`](https://ffmpeg.org) at 30 fps and pipes each frame through
+   [`ffmpeg`](https://ffmpeg.org) at a target frame rate (default 30 fps;
+   `--fps 20` for the low-bandwidth variant) and pipes each frame through
    [`chafa`](https://hpjansson.org/chafa/). Output is one `.ans` file per frame per
    width bucket: 40, 60, 80, 100, 120, 140, 160, 180, 200 cells wide. Nine buckets,
-   ~15k frames each, a few gigabytes total.
+   ~10k–15k frames each, a few gigabytes total.
 2. **Serve.** A small [`telnetlib3`](https://github.com/jquast/telnetlib3) server
    accepts connections, reads window size from
    [RFC 1073 NAWS](https://www.rfc-editor.org/rfc/rfc1073), picks the biggest bucket
-   that fits, and pumps frames at 30 fps. The play loop watches for fresh NAWS
-   updates and switches buckets on the fly when you resize. Slow clients get fewer
-   frames — the loop drops them rather than queueing — so playback stays in sync
-   instead of wedging.
+   that fits, and pumps frames at the configured fps. The play loop watches for
+   fresh NAWS updates and switches buckets on the fly when you resize. Slow clients
+   get fewer frames — the loop drops them rather than queueing — so playback stays
+   in sync instead of wedging. WAN clients benefit from drain-on-seek, tight write
+   buffers, and `TCP_NODELAY`; see [`docs/performance-tuning.md`](docs/performance-tuning.md).
 3. **Deploy.** Unprivileged Debian 12 LXC on Proxmox, bound to TCP 23 via
    `setcap cap_net_bind_service=+ep`. Public traffic goes through an
-   nginx-proxy-manager TCP stream.
+   nginx-proxy-manager TCP stream. Operators choose 20 or 30 fps at deploy time
+   (or any time afterward) via [`tools/switch_fps.sh`](tools/switch_fps.sh), which
+   flips the systemd unit and auto-archives the inactive frame set.
 
 The frames are not in this repo. They're a few gigabytes of pre-rendered escape codes,
 re-baked locally from whatever source video you supply. See
 [`docs/bake.md`](docs/bake.md).
 
+## 30 fps or 20 fps?
+
+Both are supported; the tradeoff is bandwidth vs. motion smoothness.
+
+| | 30 fps truecolor | 20 fps truecolor |
+|---|---|---|
+| per-second bandwidth (80-wide) | ~1.3 MB/s peak | ~0.9 MB/s peak (−28%) |
+| motion smoothness | ideal for the demo's fast sections | acceptable; mild stutter on the 3D tunnel / scroll credits |
+| disk (9 buckets, uncompressed) | ~14 GB | ~9.4 GB |
+| WAN viewer experience | great on fiber, rough on cellular / hotel wifi | consistently playable on most links |
+
+**Rule of thumb**: if your viewers are on home fiber (the typical demoscene audience),
+bake 30 fps. If they're on mobile/coffee-shop/hotel wifi or your server's uplink is
+constrained, bake 20 fps. You can bake **both** and flip between them on the live
+server without a redeploy — see [`docs/deploy.md`](docs/deploy.md#switching-fps-on-a-live-server).
+
 ## Known limitations
 
-- **Bandwidth.** 30fps truecolor ANSI is heavy. The 80-wide bucket runs around
-  300 KB/sec; the 200-wide bucket can hit 2 MB/sec. Cellular, hotel wifi, and packet-
-  dropping proxies will degrade gracefully (slow clients see a lower effective frame
-  rate), but a really bad link can still drop you mid-stream. Reconnect, or shrink
-  your terminal to drop into a smaller bucket.
+- **Bandwidth.** Truecolor ANSI is heavy. At 30 fps the 80-wide bucket runs around
+  300 KB/sec; the 200-wide bucket can hit 2 MB/sec. At 20 fps everything drops ~28%.
+  Cellular, hotel wifi, and packet-dropping proxies will degrade gracefully (slow
+  clients see a lower effective frame rate), but a really bad link can still drop
+  you mid-stream. Reconnect, or shrink your terminal to drop into a smaller bucket.
 - **No audio.** Purple Motion and Skaven's soundtrack is half the demo. Play it
   yourself alongside the stream from your favorite tracker/mod source.
 - **Minimum size.** Terminals below 40x20 get rejected at connect — anything smaller
@@ -85,9 +105,12 @@ re-baked locally from whatever source video you supply. See
 
 ## Documentation
 
-- [`docs/bake.md`](docs/bake.md) — re-baking frames from your own source video.
+- [`docs/bake.md`](docs/bake.md) — re-baking frames from your own source video,
+  including 20fps vs 30fps options and baking both for runtime switching.
 - [`docs/deploy.md`](docs/deploy.md) — Proxmox LXC setup, systemd unit, port 23
-  binding, firewall notes.
+  binding, firewall notes, and the `switch_fps.sh` flip workflow.
+- [`docs/performance-tuning.md`](docs/performance-tuning.md) — WAN-client latency
+  analysis, tiered optimization plan, what's shipped vs. what's pending.
 - [`docs/credits.md`](docs/credits.md) — Future Crew, Jeff Quast, and everything else
   this project stands on.
 
@@ -103,13 +126,20 @@ pip install -e .
 # this repo assumes second_reality_short.webm in the project root.
 # see docs/bake.md for how to prepare one.
 
-# bake frames into ./frames/
-python tools/bake_frames.py second_reality_short.webm
+# bake frames at 30 fps into ./frames-30fps/ (default, best fidelity)
+python tools/bake_frames.py second_reality_short.webm --workers 5
+
+# OR bake at 20 fps into ./frames-20fps/ (low-bandwidth variant)
+python tools/bake_frames.py second_reality_short.webm --fps 20 \
+    --output frames-20fps --workers 5
 
 # play locally in your own terminal (no networking, sanity check)
-python tools/play.py frames/120
+python tools/play.py frames-30fps/120
 
 # run the telnet server on a non-privileged port for local testing
+# (defaults to ./frames-30fps at 30fps; for 20fps run:
+#    python -m srtelnet.server --port 2323 --frames ./frames-20fps \
+#        --fps 20 --max-frames 10163 --skip 897:1117)
 python -m srtelnet.server --port 2323
 
 # then, from another terminal:

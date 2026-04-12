@@ -58,7 +58,11 @@ def check_tools() -> None:
     if missing:
         sys.exit(
             f"[error] required tools not found on PATH: {', '.join(missing)}\n"
-            f"        install with: brew install ffmpeg chafa"
+            f"        install one of:\n"
+            f"          macOS:            brew install ffmpeg chafa\n"
+            f"          Debian / Ubuntu:  sudo apt install ffmpeg chafa\n"
+            f"          Arch / Omarchy:   sudo pacman -S ffmpeg chafa\n"
+            f"          Fedora:           sudo dnf install ffmpeg chafa"
         )
 
 
@@ -229,8 +233,9 @@ def main() -> int:
              f"frames, still looks great on modern terminals).",
     )
     ap.add_argument(
-        "--output", type=Path, default=Path("frames"),
-        help="output directory root (default ./frames)",
+        "--output", type=Path, default=Path("frames-30fps"),
+        help="output directory root (default ./frames-30fps for a 30fps "
+             "bake; use --output frames-20fps when baking at --fps 20)",
     )
     ap.add_argument(
         "--workers", type=int,

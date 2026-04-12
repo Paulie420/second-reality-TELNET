@@ -45,30 +45,58 @@ If you're running on a high port (e.g. 2323), skip this step entirely.
 
 ## 3. Ship the baked frames
 
-The frames are not in the git repo — they're 14 GB. Bake them on your
-workstation (see `docs/bake.md`), then ship them over with zstd
-compression:
+The frames are not in the git repo — they're 9–14 GB depending on fps.
+Bake them on your workstation (see `docs/bake.md`), then ship them
+over with zstd compression.
+
+If you baked **30fps only** (classic default):
 
 ```bash
 # on your workstation, inside the repo:
-tar -C frames -cf - . | zstd -T0 -6 -o /tmp/sr-frames.tar.zst
-scp /tmp/sr-frames.tar.zst paulie420@<lxc-ip>:/tmp/
+tar -C frames -cf - . | zstd -T4 -6 -o /tmp/sr-frames-30fps.tar.zst
+scp /tmp/sr-frames-30fps.tar.zst paulie420@<lxc-ip>:/tmp/
 
 # on the LXC:
 cd ~/second-reality-TELNET
-mkdir -p frames
-zstd -dc /tmp/sr-frames.tar.zst | tar -C frames -xf -
-du -sh frames   # sanity check: should be ~14G
-rm /tmp/sr-frames.tar.zst
+mkdir -p frames-30fps
+zstd -dc /tmp/sr-frames-30fps.tar.zst | tar -C frames-30fps -xf -
+du -sh frames-30fps   # sanity check: should be ~14G
+rm /tmp/sr-frames-30fps.tar.zst
 ```
+
+If you baked **20fps only** (low-bandwidth variant):
+
+```bash
+# on your workstation:
+tar -C frames-20fps -cf - . | zstd -T4 -6 -o /tmp/sr-frames-20fps.tar.zst
+scp /tmp/sr-frames-20fps.tar.zst paulie420@<lxc-ip>:/tmp/
+
+# on the LXC:
+cd ~/second-reality-TELNET
+mkdir -p frames-20fps
+zstd -dc /tmp/sr-frames-20fps.tar.zst | tar -C frames-20fps -xf -
+du -sh frames-20fps   # ~9.4G
+rm /tmp/sr-frames-20fps.tar.zst
+```
+
+If you baked **both**, repeat the flow for each. You'll end up with
+`frames-20fps/` and `frames-30fps/` side by side; `switch_fps.sh`
+(step 5) expects exactly this layout.
 
 ## 4. First run (manual)
 
-Before wiring systemd, make sure it works by hand:
+Before wiring systemd, make sure it works by hand. Pick whichever
+bake you want to test first:
 
 ```bash
 source .venv/bin/activate
-python -m srtelnet.server --port 2323 --frames ./frames
+
+# 30fps run:
+python -m srtelnet.server --port 2323 --frames ./frames-30fps
+
+# OR 20fps run (scale the end-trim and skip to 20fps):
+python -m srtelnet.server --port 2323 --frames ./frames-20fps \
+    --fps 20 --max-frames 10163 --skip 897:1117
 ```
 
 You should see `listening on 0.0.0.0:2323` and the per-bucket load lines.
@@ -78,25 +106,96 @@ From another terminal:
 telnet <lxc-ip> 2323
 ```
 
-You should get the welcome screen. Press any key to start playback. Press
-`q` to quit.
+You should get the welcome screen — the stats line reflects whichever
+fps / frame count you launched with (no code edit needed to keep the
+display accurate). Press any key to start playback. Press `q` to quit.
 
 Ctrl-C the server to stop.
 
-## 5. Install the systemd unit
+## 5. Install the systemd unit via switch_fps.sh
 
-The repo ships a unit file at `deploy/srtelnet.service`. Install it:
+Instead of hand-editing `/etc/systemd/system/srtelnet.service`, use the
+`tools/switch_fps.sh` script — it generates a canonical unit for the
+requested fps, reloads systemd, restarts the service, and verifies the
+restart. Works for both initial install and subsequent fps flips.
+
+```bash
+cd ~/second-reality-TELNET
+sudo tools/switch_fps.sh 20    # or 30, whichever you want to run
+```
+
+After it completes:
+
+```bash
+sudo systemctl status srtelnet.service
+sudo systemctl enable srtelnet.service    # so it starts on boot
+journalctl -u srtelnet.service -f         # tail logs live
+```
+
+You should see 9 bucket-indexed lines, a `listening on 0.0.0.0:2323`,
+and (for 20fps) a `playback skips: [(897, 1117)]` confirmation in the
+logs.
+
+### Manual unit install (alternative)
+
+The repo also ships a template at `deploy/srtelnet.service`. If you
+prefer managing the unit by hand:
 
 ```bash
 sudo cp deploy/srtelnet.service /etc/systemd/system/srtelnet.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now srtelnet.service
-sudo systemctl status srtelnet.service
-journalctl -u srtelnet.service -f   # tail logs live
 ```
 
-If you change `--port` in the unit file, remember to
-`sudo systemctl daemon-reload && sudo systemctl restart srtelnet.service`.
+Note that `switch_fps.sh` **overwrites** any manually-installed unit
+with its generated version. If you've customized the unit (extra
+env vars, resource limits, etc.), either put those customizations
+into `switch_fps.sh`'s unit-writing functions or use a drop-in at
+`/etc/systemd/system/srtelnet.service.d/override.conf` which systemd
+layers on top and `switch_fps.sh` does not touch.
+
+## 5a. Switching fps on a live server
+
+Operators can flip between 20fps and 30fps on the running service
+without a redeploy or a rebake — provided both frame sets have been
+shipped to the LXC at least once. `switch_fps.sh` handles:
+
+- Writing a fresh systemd unit for the target fps (with the correct
+  `--fps`, `--max-frames`, `--skip`, and `--frames` path).
+- `daemon-reload` and `restart`.
+- **Auto-archiving the inactive fps** to `archives/frames-NNfps.tar.zst`
+  and removing the uncompressed copy, reclaiming disk.
+- **Auto-unpacking** the target fps from its archive if only the
+  compressed version is on disk.
+
+Typical flow:
+
+```bash
+# currently serving 30fps, want to switch to 20fps:
+cd ~/second-reality-TELNET
+sudo tools/switch_fps.sh 20
+# ... restart ...
+# ... archives frames-30fps/ -> archives/frames-30fps.tar.zst ...
+# ... reclaims ~14 GB ...
+
+# later, back to 30fps:
+sudo tools/switch_fps.sh 30
+# ... unpacks archives/frames-30fps.tar.zst -> frames-30fps/ ...
+# ... restart ...
+# ... archives frames-20fps/ -> archives/frames-20fps.tar.zst ...
+# ... reclaims ~9.4 GB ...
+```
+
+`switch_fps.sh status` shows which fps is currently serving, what
+frame sets are on disk (uncompressed vs archived), and the recent
+bucket-index log lines.
+
+### One-time migration note
+
+If you upgraded from an older deploy that stored 30fps frames at
+`frames/` (no fps suffix), the first `switch_fps.sh` invocation will
+automatically rename `frames/` → `frames-30fps/` before doing anything
+else. Safe to run repeatedly — the rename only happens if needed.
 
 ## 6. Publishing via Nginx Proxy Manager (TCP stream)
 

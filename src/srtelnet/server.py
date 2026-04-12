@@ -29,6 +29,7 @@ import argparse
 import asyncio
 import logging
 import os
+import re
 import socket
 import sys
 import time
@@ -39,7 +40,7 @@ import telnetlib3
 # ---------------------------------------------------------------- constants
 DEFAULT_PORT = 2323
 DEFAULT_FPS = 30.0
-DEFAULT_FRAMES_ROOT = Path(os.environ.get("SRTELNET_FRAMES", "frames"))
+DEFAULT_FRAMES_ROOT = Path(os.environ.get("SRTELNET_FRAMES", "frames-30fps"))
 BUCKETS_ORDER = (40, 60, 80, 100, 120, 140, 160, 180, 200)
 # Trim the trailing "GRAPHICS/MUSIC/CODE" credit card off the short bake.
 # ffmpeg blackdetect puts the last black segment end at 508.274s -> frame 15249,
@@ -164,10 +165,31 @@ BUCKETS: dict[int, Bucket] = {}
 MAX_FRAMES: int | None = None  # set at startup from CLI
 SKIPS: list[tuple[int, int]] = []  # set at startup from CLI
 
+# Runtime stats for the welcome screen. Populated at startup from the
+# live configuration (fps CLI, indexed buckets) so the welcome display
+# always matches what is actually being served — no code edit needed
+# when fps or frame counts change. See render_welcome().
+_STATS_FPS: float = 30.0
+_STATS_FRAMES: int = 0
+
+
+# Chafa emits DECTCEM cursor-hide at the top of each rendered frame and
+# DECTCEM cursor-show at the bottom. When we pump frames at 20-30 fps
+# with TCP_NODELAY enabled (no Nagle coalescing) over a WAN link, the
+# few-millisecond gap between a frame's trailing "show" and the next
+# frame's leading "hide" is long enough for the client terminal to
+# render the cursor, producing a visible rapid flash. We strip both
+# sequences at parse time so the cached line tuple contains no cursor
+# toggles — the shell itself emits HIDE_CURSOR once at connect and that
+# stays in effect throughout playback.
+_CHAFA_CURSOR_TOGGLE_RE = re.compile(r"\x1b\[\?25[lh]")
+
 
 def _parse_frame_lines(raw: str) -> list[str]:
     """Split a chafa .ans file into per-row strings, dropping the trailing
-    empty line produced by the final newline."""
+    empty line produced by the final newline. Also strips chafa's
+    per-frame cursor show/hide toggles (see _CHAFA_CURSOR_TOGGLE_RE)."""
+    raw = _CHAFA_CURSOR_TOGGLE_RE.sub("", raw)
     lines = raw.split("\n")
     while lines and lines[-1] == "":
         lines.pop()
@@ -423,8 +445,13 @@ def render_welcome(
         _C_GOLD + _BOLD)
     add(bar, _C_PURPLE)
 
-    # --- stats (1 row) with session + lifetime counters when available
-    parts = ["15,244 frames", "30 fps", "truecolor ANSI"]
+    # --- stats (1 row) with session + lifetime counters when available.
+    # Frame count and fps are read from the live runtime config so the
+    # welcome always matches what is actually being served — no code edit
+    # needed when the fps or bake changes.
+    fps_str = f"{_STATS_FPS:g} fps"       # 20 -> "20 fps", 24.0 -> "24 fps"
+    frames_str = f"{_STATS_FRAMES:,} frames" if _STATS_FRAMES else "frames"
+    parts = [frames_str, fps_str, "truecolor ANSI"]
     if session > 0:
         parts.append(f"session #{session}")
     if lifetime > 0:
@@ -1183,6 +1210,11 @@ def main() -> int:
     # override without code changes. Stash the CLI choice there.
     os.environ["SRTELNET_FPS"] = str(args.fps)
 
+    # Make the live fps available to the welcome-screen renderer so its
+    # stats line always reflects what we are actually serving.
+    global _STATS_FPS
+    _STATS_FPS = args.fps
+
     # Load the persistent lifetime counter so the welcome screen can show
     # a real "connection #N ever" tally across restarts.
     global _COUNTER_PATH, _LIFETIME_COUNTER, _STATUS_PATH
@@ -1210,6 +1242,12 @@ def main() -> int:
     log.info("connection log: %s", _CONNLOG_PATH)
 
     load_all_buckets(args.frames)
+
+    # After indexing, record the served frame count (all buckets have the
+    # same length post MAX_FRAMES + SKIPS trim) for the welcome stats line.
+    global _STATS_FRAMES
+    if BUCKETS:
+        _STATS_FRAMES = len(next(iter(BUCKETS.values())).paths)
 
     # Pre-warm the most popular bucket so the very first client gets smooth
     # playback without per-frame disk reads.

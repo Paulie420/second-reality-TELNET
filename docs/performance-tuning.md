@@ -44,13 +44,8 @@ work, no rebake, no visual change, and fixes the user-visible complaint.
 
 ### Tier 2 — bigger surgery, bigger wins
 
-- [ ] **4. 256-color rebake at 30 fps.** Truecolor SGR (`\x1b[38;2;R;G;Bm`,
-      up to 19 bytes per color change) shrinks to 256-color
-      (`\x1b[38;5;Nm`, up to 11 bytes). 30–40% fewer bytes on frames
-      dominated by color changes. Modern terminals still look great in
-      256-color. *A previous 256-color experiment (f62d241) was reverted
-      because it was paired with 20 fps, which hurt motion. 256-color at
-      the original 30 fps has not yet been tested in isolation.*
+- [x] **4. Bandwidth reduction at the chafa stage.** *(shipped as 20fps
+      truecolor rebake, 2026-04-12 — see post-mortem below)*
 - [ ] **5. Per-client bucket downgrade on sustained backpressure.** If
       `consec_skip` stays above a threshold for a few seconds, drop the
       client to the next smaller bucket (e.g. 120 → 100 → 80). Keeps WAN
@@ -60,6 +55,39 @@ work, no rebake, no visual change, and fixes the user-visible complaint.
 - [ ] **6. On-connect bandwidth probe.** Write a ~200 KB pad at connect
       time, measure drain rate, bias the initial bucket pick accordingly.
       Rougher than #5 but simpler. Best combined with #5.
+
+#### Post-mortem on #4
+
+Original hypothesis was that **256-color chafa output** would cut
+30–40% of per-frame bytes while preserving acceptable fidelity. A
+sanity rebake (2026-04-12) confirmed the byte savings — 42 KB/frame
+truecolor vs 18 KB/frame 256-color in the 80-wide bucket, a 57%
+reduction, better than predicted. But *Second Reality*'s gradient-heavy
+plasma / fire / fade sections banded visibly under 8-bit palette
+reduction, and dithering variants (diffusion, fine-grain, all-symbols
+with half-blocks) produced noisy fallbacks that looked worse than the
+banding. All 256-color variants were rejected on visual grounds.
+
+The actual shipped solution was a **20fps truecolor rebake** instead:
+same visual fidelity as the existing 30fps truecolor, but with 33%
+fewer frames per second on the wire (~28% actual bandwidth reduction
+after accounting for slightly larger per-frame deltas at 20fps). Motion
+smoothness suffers mildly on the 3D tunnel and credit-scroll sections
+but is acceptable to a modern audience accustomed to 24fps film and
+YouTube's frequent 20–30fps content. Deployed 2026-04-12, live at
+`telnet 20forbeers.com`. See [`bake.md`](bake.md#30fps-or-20fps)
+and [`deploy.md`](deploy.md#switching-fps-on-a-live-server) for the
+current workflow.
+
+#### Future work: wall-clock-based `MAX_FRAMES` / `SKIPS`
+
+`server.py` hardcodes `DEFAULT_MAX_FRAMES = 15244` and
+`DEFAULT_SKIPS = [(1346, 1676)]` in 30fps-frame units. The 20fps deploy
+overrides these via `--max-frames 10163 --skip 897:1117`, values
+computed as `30fps-default × 20/30`. A cleaner design would store these
+as wall-clock seconds and auto-convert at startup based on `--fps`,
+eliminating the need for the overrides (and for `switch_fps.sh` to
+bake them into the unit). Low priority — current approach works.
 
 ### Tier 3 — good ideas, questionable ROI
 

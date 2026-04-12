@@ -9,11 +9,15 @@ Type=simple
 User=paulie420
 Group=paulie420
 WorkingDirectory=/home/paulie420/second-reality-TELNET
+# Reference 30fps truecolor unit. For live management, prefer
+# `tools/switch_fps.sh 20|30` which (re)writes this file and handles
+# fps-specific flags automatically — see docs/deploy.md.
+#
 # The venv python has cap_net_bind_service set so it can bind low ports
 # without needing sudo. Change --port to 23 if you want standard telnet.
 ExecStart=/home/paulie420/second-reality-TELNET/.venv/bin/python -m srtelnet.server \
     --port 2323 \
-    --frames /home/paulie420/second-reality-TELNET/frames \
+    --frames /home/paulie420/second-reality-TELNET/frames-30fps \
     --fps 30 \
     --prewarm 80
 Restart=on-failure
