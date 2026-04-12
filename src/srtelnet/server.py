@@ -80,9 +80,15 @@ DRAIN_TIMEOUT = 30.0
 # queued-byte count BEFORE each frame and skip the frame if we're backed
 # up — the same coping strategy the wall-clock skip logic uses, but
 # keyed on actual network state instead of elapsed time.
-WRITE_BUF_HIGH = 1024 * 1024   # 1 MB: drain blocks above this
-WRITE_BUF_LOW = 256 * 1024     # 256 KB: drain returns below this
-WRITE_BUF_SKIP = 512 * 1024    # 512 KB: skip next frame above this
+#
+# These watermarks also double as the input-to-display latency ceiling
+# for WAN clients. With a 100–300 KB/s client, a 128 KB SKIP ceiling
+# caps keystroke→render lag at ~0.4–1.3s (vs. ~2–5s with the old 512 KB
+# ceiling), at the cost of skipping frames slightly earlier when the
+# client can't keep up. See docs/performance-tuning.md for rationale.
+WRITE_BUF_HIGH = 256 * 1024    # 256 KB: transport pause_writing above this
+WRITE_BUF_LOW = 48 * 1024      # 48 KB:  drain returns / seek-drain target
+WRITE_BUF_SKIP = 128 * 1024    # 128 KB: skip next frame above this
 # If a client is so slow that we skip this many consecutive frames, they
 # are effectively dead (or on a connection that can't sustain even a
 # trickle). Disconnect gracefully instead of burning server resources
@@ -736,10 +742,16 @@ def _write_buffer_size(writer) -> int:
         return 0
 
 
-def _enable_keepalive(writer) -> None:
-    """Turn on TCP keepalive for this connection so dead peers are detected
-    faster than the OS default (~2 hours on Linux). Best-effort: silently
-    no-ops on platforms / transports that don't expose a socket."""
+def _configure_socket(writer) -> None:
+    """Configure TCP socket options on the accepted connection:
+      - SO_KEEPALIVE + Linux keepalive knobs so dead peers are detected in
+        ~60s instead of the OS default (~2 hours on Linux).
+      - TCP_NODELAY (disable Nagle) so per-frame writes hit the wire
+        immediately. At 30 fps our writes are frequent enough that Nagle's
+        coalescing adds up to ~200 ms of latency for no benefit — we're
+        already batching at the application layer.
+    Best-effort: silently no-ops on platforms / transports that don't
+    expose a socket."""
     try:
         sock = writer.get_extra_info("socket")
     except Exception:
@@ -756,8 +768,9 @@ def _enable_keepalive(writer) -> None:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
         if hasattr(socket, "TCP_KEEPCNT"):
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except OSError as e:
-        log.debug("keepalive setsockopt failed: %s", e)
+        log.debug("socket setsockopt failed: %s", e)
 
 
 async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str, int, int]:
@@ -784,6 +797,10 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
     target = loop.time()
     skipped = 0
     consec_skip = 0
+    # After a seek we force the very next frame to be written regardless of
+    # the backpressure skip, so the target frame is guaranteed to land even
+    # on a slow link. Reset to False after the post-seek frame goes out.
+    force_next_frame = False
 
     while i < n_frames:
         # Live NAWS resize handling. telnetlib3 updates the extra_info dict
@@ -817,6 +834,7 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
             target = loop.time()  # resync the frame clock after the wipe
 
         resync = False
+        seeked = False
         while not key_q.empty():
             try:
                 key = key_q.get_nowait()
@@ -830,9 +848,38 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
             elif key == "LEFT":
                 i = max(0, i - seek_frames)
                 resync = True
+                seeked = True
             elif key == "RIGHT":
                 i = min(n_frames - 1, i + seek_frames)
                 resync = True
+                seeked = True
+
+        # On seek (LEFT/RIGHT): the TCP send buffer may already hold a
+        # backlog of pre-seek frames that will paint on the client
+        # BEFORE the new target frame arrives. On a WAN link that's
+        # seconds of "nothing happened." Three-part fix:
+        #   (a) write CLEAR+HOME immediately so the user gets instant
+        #       visual acknowledgment that seek registered — the terminal
+        #       clears, and whatever was queued paints onto a blank
+        #       canvas,
+        #   (b) wait (bounded) for the write buffer to drain below
+        #       WRITE_BUF_LOW so the backlog flushes before we commit to
+        #       the new position,
+        #   (c) bypass the backpressure skip for the first post-seek
+        #       frame, so even if the buffer is still over the skip
+        #       threshold, the target frame is guaranteed to land.
+        # Net effect: seeks feel like a real seek (instant clear, brief
+        # pause, new position appears) instead of a several-second stall.
+        if seeked:
+            try:
+                writer.write(CLEAR + HOME)
+            except (ConnectionResetError, BrokenPipeError):
+                return "DISCONNECT"
+            seek_deadline = loop.time() + 1.5
+            while (_write_buffer_size(writer) > WRITE_BUF_LOW
+                   and loop.time() < seek_deadline):
+                await asyncio.sleep(0.05)
+            force_next_frame = True
 
         if paused:
             try:
@@ -867,7 +914,11 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
         # frames yet (slow WAN link, congested uplink, etc.) don't stack
         # another 50-80 KB on top — drop this frame instead. Lets the
         # skip-frame rate track real network speed instead of wall clock.
-        if _write_buffer_size(writer) > WRITE_BUF_SKIP:
+        # Exception: the first frame after a seek bypasses the skip so
+        # the target frame is guaranteed to land — otherwise on a slow
+        # link the seek would drop its own target frame.
+        if (not force_next_frame
+                and _write_buffer_size(writer) > WRITE_BUF_SKIP):
             skipped += 1
             consec_skip += 1
             if consec_skip > MAX_CONSEC_SKIP:
@@ -878,6 +929,7 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
             continue
 
         consec_skip = 0  # client is keeping up, reset the dead-client counter
+        force_next_frame = False  # consumed; revert to normal skip behavior
 
         try:
             lines = read_frame(bucket, i)
@@ -955,9 +1007,10 @@ async def shell(reader, writer) -> None:
         save_counter(_COUNTER_PATH, lifetime)
     _write_status()
 
-    # Turn on TCP keepalive so dead clients are detected in ~60s instead of
-    # the kernel default (~2 hours on Linux).
-    _enable_keepalive(writer)
+    # Configure the TCP socket: keepalive (for dead-peer detection in
+    # ~60s) and TCP_NODELAY (to kill Nagle's coalescing delay on the
+    # per-frame writes we do at 30 fps).
+    _configure_socket(writer)
     # Explicit write-buffer watermarks so the play loop's backpressure
     # check has a predictable threshold to compare against.
     _configure_write_buffer(writer)
