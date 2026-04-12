@@ -509,12 +509,23 @@ async def key_reader(reader, queue: asyncio.Queue) -> None:
 # Resets on server restart.
 _SESSION_COUNTER = 0
 
+# Active (concurrent) connection count — incremented on connect, decremented
+# on disconnect. Written to _STATUS_PATH so admins can `cat` it any time.
+_ACTIVE_CONNECTIONS = 0
+_PEAK_CONNECTIONS = 0       # high-water mark since process start
+
 # Lifetime connection counter — total connections ever served, persisted to
 # disk so restarts don't lose the count. Loaded at startup from _COUNTER_PATH
 # and rewritten on every new connection. Best-effort: if the file is missing
 # or unwritable we log a warning and keep counting in memory.
 _LIFETIME_COUNTER = 0
 _COUNTER_PATH: Path | None = None
+
+# Path for the live status file, written on every connect/disconnect.
+DEFAULT_STATUS_FILE = Path(
+    os.environ.get("SRTELNET_STATUS_FILE", "state/status.txt")
+)
+_STATUS_PATH: Path | None = None
 
 
 def load_counter(path: Path) -> int:
@@ -543,6 +554,49 @@ def save_counter(path: Path, value: int) -> None:
     except OSError as e:
         log.warning("counter file %s unwritable (%s); lifetime count not saved",
                     path, e)
+
+
+def _write_status() -> None:
+    """Write a human-readable status file with live connection stats. Called
+    on every connect and disconnect so `cat state/status.txt` always shows
+    current state. Best-effort — never fatal."""
+    if _STATUS_PATH is None:
+        return
+    try:
+        uptime_s = time.monotonic() - _SERVER_START_TIME
+        h, rem = divmod(int(uptime_s), 3600)
+        m, s = divmod(rem, 60)
+        # Which buckets are currently cached (non-None entries)?
+        cached_buckets = []
+        for w in BUCKETS_ORDER:
+            b = BUCKETS.get(w)
+            if b is not None:
+                n_cached = sum(1 for c in b.cache if c is not None)
+                if n_cached > 0:
+                    cached_buckets.append(f"  {w:>3}w: {n_cached}/{len(b.cache)} frames cached")
+        lines = [
+            f"second-reality-TELNET status",
+            f"============================",
+            f"active connections : {_ACTIVE_CONNECTIONS}",
+            f"peak connections   : {_PEAK_CONNECTIONS}",
+            f"session total      : {_SESSION_COUNTER}",
+            f"lifetime total     : {_LIFETIME_COUNTER}",
+            f"uptime             : {h}h {m}m {s}s",
+            f"",
+            f"cached buckets:",
+            *(cached_buckets if cached_buckets else ["  (none)"]),
+            f"",
+            f"updated: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        ]
+        _STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _STATUS_PATH.with_suffix(_STATUS_PATH.suffix + ".tmp")
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tmp.replace(_STATUS_PATH)
+    except OSError as e:
+        log.debug("status file write failed: %s", e)
+
+
+_SERVER_START_TIME = time.monotonic()
 
 
 async def _drain_bounded(writer) -> None:
@@ -771,13 +825,17 @@ async def _drain_keys(key_q: asyncio.Queue) -> None:
 async def shell(reader, writer) -> None:
     """Per-connection coroutine:
        welcome → play → goodbye (held until keypress or timeout)"""
-    global _SESSION_COUNTER, _LIFETIME_COUNTER
+    global _SESSION_COUNTER, _LIFETIME_COUNTER, _ACTIVE_CONNECTIONS, _PEAK_CONNECTIONS
     _SESSION_COUNTER += 1
     _LIFETIME_COUNTER += 1
+    _ACTIVE_CONNECTIONS += 1
+    if _ACTIVE_CONNECTIONS > _PEAK_CONNECTIONS:
+        _PEAK_CONNECTIONS = _ACTIVE_CONNECTIONS
     session = _SESSION_COUNTER
     lifetime = _LIFETIME_COUNTER
     if _COUNTER_PATH is not None:
         save_counter(_COUNTER_PATH, lifetime)
+    _write_status()
 
     # Turn on TCP keepalive so dead clients are detected in ~60s instead of
     # the kernel default (~2 hours on Linux).
@@ -849,12 +907,14 @@ async def shell(reader, writer) -> None:
             pass
 
     finally:
+        _ACTIVE_CONNECTIONS -= 1
+        _write_status()
         reader_task.cancel()
         try:
             writer.close()
         except Exception:
             pass
-        log.info("disconnect %s", peer)
+        log.info("disconnect %s active=%d", peer, _ACTIVE_CONNECTIONS)
 
 
 # ---------------------------------------------------------------- entrypoint
@@ -885,6 +945,9 @@ def main() -> int:
                     help=f"persistent lifetime connection counter file "
                          f"(default {DEFAULT_COUNTER_FILE}, overridable via "
                          f"$SRTELNET_COUNTER_FILE)")
+    ap.add_argument("--status-file", type=Path, default=DEFAULT_STATUS_FILE,
+                    help=f"live status file path (default {DEFAULT_STATUS_FILE}, "
+                         f"overridable via $SRTELNET_STATUS_FILE)")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="debug-level logging")
     args = ap.parse_args()
@@ -919,10 +982,14 @@ def main() -> int:
 
     # Load the persistent lifetime counter so the welcome screen can show
     # a real "connection #N ever" tally across restarts.
-    global _COUNTER_PATH, _LIFETIME_COUNTER
+    global _COUNTER_PATH, _LIFETIME_COUNTER, _STATUS_PATH
     _COUNTER_PATH = args.counter_file
     _LIFETIME_COUNTER = load_counter(_COUNTER_PATH)
     log.info("lifetime counter: %d (from %s)", _LIFETIME_COUNTER, _COUNTER_PATH)
+
+    _STATUS_PATH = args.status_file
+    _write_status()  # write initial status on startup
+    log.info("status file: %s", _STATUS_PATH)
 
     load_all_buckets(args.frames)
 
