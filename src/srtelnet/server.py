@@ -38,7 +38,7 @@ import telnetlib3
 
 # ---------------------------------------------------------------- constants
 DEFAULT_PORT = 2323
-DEFAULT_FPS = 30.0
+DEFAULT_FPS = 20.0
 DEFAULT_FRAMES_ROOT = Path(os.environ.get("SRTELNET_FRAMES", "frames"))
 BUCKETS_ORDER = (40, 60, 80, 100, 120, 140, 160, 180, 200)
 # Trim the trailing "GRAPHICS/MUSIC/CODE" credit card off the short bake.
