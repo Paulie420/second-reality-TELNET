@@ -17,13 +17,12 @@ echo " swap:    $SWAP"
 echo " telnet:  $TELNET active TCP connections"
 echo "========================================"
 if [ -f "$SR/state/status.txt" ]; then
-    # print status.txt but skip the header lines we already covered
-    grep -E "active conn|peak conn|session|lifetime|cache policy|^\s+\d+w:|buckets:" "$SR/state/status.txt"
+    grep -E "active conn|peak conn|session|lifetime|cache policy|[0-9]+w:|buckets:" "$SR/state/status.txt"
 fi
 echo "----------------------------------------"
 echo " last 5 connections:"
 if [ -f "$SR/state/connections.csv" ]; then
-    tail -5 "$SR/state/connections.csv" | awk -F, '{printf " %-11s %3sw %5ss %s\n", $1, $3, $7, $8}'
+    tail -5 "$SR/state/connections.csv" | grep -v '^timestamp' | awk -F, '{printf " %-11s %3sw %5ss %s\n", $1, $3, $7, $8}'
 else
     echo " (no log yet)"
 fi
