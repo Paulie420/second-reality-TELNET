@@ -49,5 +49,9 @@ logs/
 .env
 .envrc
 
+# operator-local host/LXC notes (deployment specifics, creds, paths)
+# that should not be part of the public repo
+system.info
+
 # local editor / agent settings
 .claude/

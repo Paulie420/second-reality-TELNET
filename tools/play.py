@@ -9,10 +9,10 @@ motion and no visual garbage, the telnet server will show the same thing to
 remote users.
 
 Usage:
-    python tools/play.py frames/80
-    python tools/play.py frames/120 --fps 30
-    python tools/play.py frames/160 --fps 30 --loop
-    python tools/play.py frames/80  --start 500 --end 1000
+    python tools/play.py frames-30fps/80
+    python tools/play.py frames-30fps/120 --fps 30
+    python tools/play.py frames-30fps/160 --fps 30 --loop
+    python tools/play.py frames-20fps/80  --fps 20 --start 500 --end 1000
 
 Controls:
     Ctrl-C          quit cleanly (cursor + colors restored)

@@ -18,7 +18,12 @@ tail -20 ~/second-reality-TELNET/state/connections.csv
 # Restart after a code update
 cd ~/second-reality-TELNET && git pull && sudo systemctl restart srtelnet
 
-# Restart after changing the .service file
+# Flip fps (preserves the unit file properly + handles archives)
+sudo tools/switch_fps.sh 20   # or 30
+sudo tools/switch_fps.sh status
+
+# Hand-edit the systemd unit (only if you have customizations the
+# switch script doesn't cover — otherwise prefer switch_fps.sh)
 sudo cp deploy/srtelnet.service /etc/systemd/system/srtelnet.service
 sudo systemctl daemon-reload && sudo systemctl restart srtelnet
 ```
@@ -159,26 +164,32 @@ export SRTELNET_CACHE_IDLE=300   # evict after 5 minutes idle
 
 ## Bandwidth capacity
 
-Each frame is sent as ANSI escape sequences over TCP. Per-client bandwidth
-by bucket width at 30 fps:
+Each frame is sent as ANSI escape sequences over TCP. Per-client
+bandwidth by bucket width and fps (truecolor):
 
-| Bucket | Avg frame size | Bandwidth per client |
-|--------|---------------|---------------------|
-| 40w    | ~14 KB        | ~0.4 MB/s           |
-| 80w    | ~42 KB        | ~1.2 MB/s           |
-| 120w   | ~87 KB        | ~2.6 MB/s           |
-| 160w   | ~137 KB       | ~4.0 MB/s           |
-| 200w   | ~210 KB       | ~6.3 MB/s           |
+| Bucket | Avg frame size | 30 fps per client | 20 fps per client |
+|--------|---------------|-------------------|-------------------|
+| 40w    | ~14 KB        | ~0.4 MB/s         | ~0.3 MB/s         |
+| 80w    | ~42 KB        | ~1.2 MB/s         | ~0.9 MB/s         |
+| 120w   | ~87 KB        | ~2.6 MB/s         | ~1.9 MB/s         |
+| 160w   | ~137 KB       | ~4.0 MB/s         | ~3.0 MB/s         |
+| 200w   | ~210 KB       | ~6.3 MB/s         | ~4.6 MB/s         |
+
+(Per-frame size is slightly larger at 20 fps because inter-frame motion
+is bigger, but per-second still drops ~28%. The table reflects real
+measurements from the current bakes.)
 
 With a **40 Mbps upload** (~5 MB/s), maximum concurrent clients:
 
-- ~4 clients at 80w
-- ~2 clients at 120w
-- ~1 client at 200w
+- ~4 clients at 80w, 30fps  (5 clients at 20fps)
+- ~2 clients at 120w, 30fps (~2-3 at 20fps)
+- ~1 client at 200w, 30fps  (~1 at 20fps)
 
 The backpressure system handles oversubscription gracefully: slow clients
-see frame drops (lower effective fps) instead of disconnects. But for the
-best experience, keep concurrent streams within your upload budget.
+see frame drops (lower effective fps) instead of disconnects. For WAN
+deployments where client bandwidth is the bottleneck, the 20 fps bake +
+`tools/switch_fps.sh 20` is the right choice — see
+[`deploy.md`](deploy.md#switching-fps-on-a-live-server).
 
 With **1 Gbps fiber** (~125 MB/s), you could serve ~100 clients at 80w
 simultaneously.
