@@ -148,6 +148,26 @@ stream only needs its incoming port to be free on the NPM host.
 - At very high fps / large buckets you may hit upstream bandwidth limits.
   The server has frame-skip pacing so it won't stall, but viewers may see
   skipped frames.
+- The server enables TCP keepalive on every accepted socket (30s idle,
+  10s probes, 3 retries) so genuinely dead clients are detected within
+  ~60s instead of hanging forever on a half-open flow. Slow-but-alive
+  clients are handled by per-frame backpressure: the play loop checks
+  the transport write-buffer size before each frame and skips the frame
+  if the buffer is over 512 KB. Result: WAN clients see a lower
+  effective frame rate instead of getting kicked.
+
+**Resizing the terminal mid-stream**:
+- The server reads NAWS (RFC 1073) on every play-loop tick, so when a
+  client resizes their terminal window, the next frame is rendered into
+  a freshly chosen bucket and re-centered on the new size. No reconnect
+  needed.
+- This works in any terminal that sends a NAWS subnegotiation on resize:
+  iTerm2, Alacritty, Kitty, Wezterm, Windows Terminal, GNOME Terminal,
+  Konsole, foot, etc. A small set of older clients only send NAWS once
+  during the initial handshake — for those, the bucket is locked to the
+  initial size and a mid-stream resize will look broken until reconnect.
+  If a user reports "the demo got mangled when I made my window bigger,"
+  ask which terminal they're using.
 
 **Frames dir empty after upgrade**:
 - `.gitignore` excludes `frames/` — `git pull` won't touch them.
