@@ -14,11 +14,16 @@ WorkingDirectory=/home/paulie420/second-reality-TELNET
 ExecStart=/home/paulie420/second-reality-TELNET/.venv/bin/python -m srtelnet.server \
     --port 2323 \
     --frames /home/paulie420/second-reality-TELNET/frames \
-    --fps 30
+    --fps 30 \
+    --prewarm 80
 Restart=on-failure
 RestartSec=3
 StandardOutput=journal
 StandardError=journal
+
+# Allow plenty of file descriptors for concurrent telnet connections.
+# Each connection is ~1 fd; default soft limit (1024) would cap us.
+LimitNOFILE=65536
 
 # Minimal hardening — unprivileged LXCs can't set up mount/cgroup/kernel
 # namespaces, so PrivateTmp/ProtectSystem/ProtectHome/Protect{Kernel,Cgroup}*

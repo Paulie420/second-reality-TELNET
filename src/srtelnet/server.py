@@ -105,19 +105,53 @@ HOME = "\x1b[H"
 log = logging.getLogger("srtelnet")
 
 
+# Maximum number of buckets to keep fully cached in Python memory at once.
+# Each cached bucket is ~1-5 GB depending on width (Python string overhead
+# makes in-memory size ~1.5-2x the on-disk .ans file size). With 8 GB RAM,
+# 4 cached buckets covers the common terminal widths (80, 100, 120, 160)
+# with room for the OS, Python interpreter, and Linux page cache.
+MAX_CACHED_BUCKETS = int(os.environ.get("SRTELNET_MAX_CACHED", "4"))
+# How long a bucket can go unused before its Python cache is evicted.
+# The on-disk frames remain; re-caching is transparent (just slower for
+# the first client to hit that width again). 600s = 10 minutes.
+CACHE_IDLE_SECONDS = float(os.environ.get("SRTELNET_CACHE_IDLE", "600"))
+
+
 # ---------------------------------------------------------------- bucket data
 class Bucket:
     """One width bucket, indexed on startup. Frames are lazily parsed and
     cached on first read — after one play-through, subsequent reads (from
     this or any other connection) return the same in-memory tuple of rows
-    without touching the filesystem or re-parsing UTF-8."""
-    __slots__ = ("width", "height", "paths", "cache")
+    without touching the filesystem or re-parsing UTF-8.
+
+    Cache eviction: when MAX_CACHED_BUCKETS is exceeded or a bucket goes
+    idle for CACHE_IDLE_SECONDS, its cache is cleared (all entries set back
+    to None). The next read re-parses from disk — the Linux page cache
+    still holds the hot files, so the I/O cost is just the Python string
+    allocation."""
+    __slots__ = ("width", "height", "paths", "cache",
+                 "access_count", "active_clients", "last_access")
 
     def __init__(self, width: int, height: int, paths: list[Path]):
         self.width = width
         self.height = height
         self.paths = paths
         self.cache: list[tuple[str, ...] | None] = [None] * len(paths)
+        self.access_count: int = 0       # total connections that used this bucket
+        self.active_clients: int = 0     # currently-playing connections
+        self.last_access: float = 0.0    # monotonic time of last frame read
+
+    def cached_count(self) -> int:
+        """How many frames are currently cached (non-None)."""
+        return sum(1 for c in self.cache if c is not None)
+
+    def clear_cache(self) -> None:
+        """Evict all cached frames, freeing Python string memory. The paths
+        list is untouched so re-caching is transparent."""
+        for i in range(len(self.cache)):
+            self.cache[i] = None
+        log.info("bucket %d cache evicted (%d frames freed)",
+                 self.width, len(self.cache))
 
 
 BUCKETS: dict[int, Bucket] = {}
@@ -189,6 +223,7 @@ def read_frame(bucket: Bucket, index: int) -> tuple[str, ...]:
     hit, returns the cached tuple on every subsequent call. All concurrent
     connections playing the same bucket share the same immutable tuples,
     so memory cost is per-bucket, not per-connection."""
+    bucket.last_access = time.monotonic()
     cached = bucket.cache[index]
     if cached is not None:
         return cached
@@ -196,6 +231,48 @@ def read_frame(bucket: Bucket, index: int) -> tuple[str, ...]:
     lines = tuple(_parse_frame_lines(raw))
     bucket.cache[index] = lines
     return lines
+
+
+def evict_idle_caches() -> None:
+    """Free Python-level frame caches for buckets that have no active clients
+    and haven't been touched recently, OR when more than MAX_CACHED_BUCKETS
+    are populated. Called on every client disconnect.
+
+    Eviction order: idle buckets first (oldest access), then least-recently-
+    used buckets if we're still over the cap. Buckets with active_clients > 0
+    are never evicted (that would just force immediate re-parsing)."""
+    now = time.monotonic()
+    cached_buckets = [b for b in BUCKETS.values() if b.cached_count() > 0]
+
+    # Phase 1: evict any bucket that's idle AND has no active clients.
+    for b in cached_buckets:
+        if b.active_clients == 0 and (now - b.last_access) > CACHE_IDLE_SECONDS:
+            b.clear_cache()
+
+    # Phase 2: if still over the cap, evict LRU (no active clients first).
+    cached_buckets = [b for b in BUCKETS.values() if b.cached_count() > 0]
+    if len(cached_buckets) > MAX_CACHED_BUCKETS:
+        # Sort: idle (no active clients) first, then by oldest last_access.
+        evictable = sorted(
+            [b for b in cached_buckets if b.active_clients == 0],
+            key=lambda b: b.last_access,
+        )
+        while len(cached_buckets) > MAX_CACHED_BUCKETS and evictable:
+            victim = evictable.pop(0)
+            victim.clear_cache()
+            cached_buckets = [b for b in BUCKETS.values() if b.cached_count() > 0]
+
+
+def prewarm_bucket(bucket: Bucket) -> None:
+    """Eagerly cache every frame in a bucket so the first client gets smooth
+    playback with no per-frame disk reads. Called at startup for the most
+    common terminal width."""
+    log.info("pre-warming bucket %d (%d frames)...", bucket.width, len(bucket.paths))
+    t0 = time.monotonic()
+    for i in range(len(bucket.paths)):
+        read_frame(bucket, i)
+    elapsed = time.monotonic() - t0
+    log.info("bucket %d pre-warmed in %.1fs", bucket.width, elapsed)
 
 
 # ---------------------------------------------------------------- rendering
@@ -527,6 +604,12 @@ DEFAULT_STATUS_FILE = Path(
 )
 _STATUS_PATH: Path | None = None
 
+# Connection log: one CSV line per connection for post-hoc analytics.
+DEFAULT_CONNLOG_FILE = Path(
+    os.environ.get("SRTELNET_CONNLOG_FILE", "state/connections.csv")
+)
+_CONNLOG_PATH: Path | None = None
+
 
 def load_counter(path: Path) -> int:
     """Read the persistent lifetime counter from disk. Returns 0 if the file
@@ -566,14 +649,23 @@ def _write_status() -> None:
         uptime_s = time.monotonic() - _SERVER_START_TIME
         h, rem = divmod(int(uptime_s), 3600)
         m, s = divmod(rem, 60)
-        # Which buckets are currently cached (non-None entries)?
-        cached_buckets = []
+        # Bucket details: cache state, popularity, active clients.
+        bucket_lines = []
         for w in BUCKETS_ORDER:
             b = BUCKETS.get(w)
-            if b is not None:
-                n_cached = sum(1 for c in b.cache if c is not None)
-                if n_cached > 0:
-                    cached_buckets.append(f"  {w:>3}w: {n_cached}/{len(b.cache)} frames cached")
+            if b is None:
+                continue
+            n_cached = b.cached_count()
+            total = len(b.cache)
+            pct = (n_cached * 100 // total) if total else 0
+            idle = ""
+            if n_cached > 0 and b.active_clients == 0 and b.last_access > 0:
+                idle_s = now - b.last_access
+                idle = f"  idle {int(idle_s)}s"
+            bucket_lines.append(
+                f"  {w:>3}w: {n_cached:>5}/{total} cached ({pct:>3}%)"
+                f"  hits={b.access_count:<4} active={b.active_clients}{idle}"
+            )
         lines = [
             f"second-reality-TELNET status",
             f"============================",
@@ -582,9 +674,11 @@ def _write_status() -> None:
             f"session total      : {_SESSION_COUNTER}",
             f"lifetime total     : {_LIFETIME_COUNTER}",
             f"uptime             : {h}h {m}m {s}s",
+            f"cache policy       : max {MAX_CACHED_BUCKETS} buckets, "
+            f"evict after {int(CACHE_IDLE_SECONDS)}s idle",
             f"",
-            f"cached buckets:",
-            *(cached_buckets if cached_buckets else ["  (none)"]),
+            f"buckets:",
+            *(bucket_lines if bucket_lines else ["  (none loaded)"]),
             f"",
             f"updated: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         ]
@@ -665,9 +759,9 @@ def _enable_keepalive(writer) -> None:
         log.debug("keepalive setsockopt failed: %s", e)
 
 
-async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> str:
-    """Play the demo once through and return a status: 'QUIT', 'DISCONNECT',
-    or 'DONE' (playback reached the end normally)."""
+async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str, int, int]:
+    """Play the demo once through and return (status, frames_played, skipped).
+    Status is 'QUIT', 'DISCONNECT', or 'DONE'."""
     loop = asyncio.get_event_loop()
     frame_interval = 1.0 / fps
     seek_frames = int(5 * fps)
@@ -682,7 +776,7 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> str:
     try:
         await _drain_bounded(writer)
     except (ConnectionResetError, BrokenPipeError):
-        return "DISCONNECT"
+        return ("DISCONNECT", 0, 0)
 
     i = 0
     paused = False
@@ -718,7 +812,7 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> str:
             try:
                 await _drain_bounded(writer)
             except (ConnectionResetError, BrokenPipeError):
-                return "DISCONNECT"
+                return ("DISCONNECT", i, skipped)
             target = loop.time()  # resync the frame clock after the wipe
 
         resync = False
@@ -728,7 +822,7 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> str:
             except asyncio.QueueEmpty:
                 break
             if key in ("QUIT", "DISCONNECT"):
-                return key
+                return (key, i, skipped)
             if key == "SPACE":
                 paused = not paused
                 resync = True
@@ -745,7 +839,7 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> str:
             except asyncio.TimeoutError:
                 continue
             if key in ("QUIT", "DISCONNECT"):
-                return key
+                return (key, i, skipped)
             if key == "SPACE":
                 paused = False
                 target = loop.time()
@@ -777,7 +871,7 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> str:
             consec_skip += 1
             if consec_skip > MAX_CONSEC_SKIP:
                 log.info("%s %d consecutive skips, giving up", peer, consec_skip)
-                return "DISCONNECT"
+                return ("DISCONNECT", i, skipped)
             i += 1
             target += frame_interval
             continue
@@ -797,10 +891,10 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> str:
                 log.debug("%s drain timeout (buf=%d), skipping drain",
                           peer, _write_buffer_size(writer))
         except (ConnectionResetError, BrokenPipeError):
-            return "DISCONNECT"
+            return ("DISCONNECT", i, skipped)
         except Exception as e:
             log.warning("%s frame %d read/write error: %s", peer, i, e)
-            return "DISCONNECT"
+            return ("DISCONNECT", i, skipped)
 
         i += 1
         target += frame_interval
@@ -810,7 +904,7 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> str:
         await asyncio.sleep(DEFAULT_END_HOLD)
     except asyncio.CancelledError:
         pass
-    return "DONE"
+    return ("DONE", n_frames, skipped)
 
 
 async def _drain_keys(key_q: asyncio.Queue) -> None:
@@ -820,6 +914,29 @@ async def _drain_keys(key_q: asyncio.Queue) -> None:
             key_q.get_nowait()
         except asyncio.QueueEmpty:
             break
+
+
+def _log_connection(peer, bucket_width: int, frames_played: int,
+                    total_frames: int, skipped: int,
+                    duration: float, outcome: str) -> None:
+    """Append one line to the connection log CSV. Best-effort — if the file
+    can't be written we just skip it. The CSV is meant for post-hoc analytics:
+    which buckets are popular, how many viewers watch the whole thing, where
+    in the world are they connecting from, etc."""
+    if _CONNLOG_PATH is None:
+        return
+    try:
+        _CONNLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ip = peer[0] if isinstance(peer, (tuple, list)) else str(peer)
+        line = (
+            f"{time.strftime('%Y-%m-%d %H:%M:%S')},"
+            f"{ip},{bucket_width},{frames_played},{total_frames},"
+            f"{skipped},{duration:.1f},{outcome}\n"
+        )
+        with open(_CONNLOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError:
+        pass
 
 
 async def shell(reader, writer) -> None:
@@ -845,9 +962,15 @@ async def shell(reader, writer) -> None:
     _configure_write_buffer(writer)
 
     peer = writer.get_extra_info("peername", ("?", 0))
-    log.info("connect %s session=%d lifetime=%d", peer, session, lifetime)
+    log.info("connect %s session=%d lifetime=%d active=%d",
+             peer, session, lifetime, _ACTIVE_CONNECTIONS)
 
     fps = float(os.environ.get("SRTELNET_FPS", DEFAULT_FPS))
+    t_connect = time.monotonic()
+    bucket: Bucket | None = None
+    outcome = "disconnect"
+    frames_played = 0
+    play_skipped = 0
 
     key_q: asyncio.Queue = asyncio.Queue()
     reader_task = asyncio.create_task(key_reader(reader, key_q))
@@ -872,6 +995,7 @@ async def shell(reader, writer) -> None:
             writer.write(render_too_small(cols, rows))
             await writer.drain()
             await asyncio.sleep(2.0)
+            outcome = "too_small"
             return
 
         writer.write(HIDE_CURSOR + CLEAR + HOME)
@@ -884,15 +1008,20 @@ async def shell(reader, writer) -> None:
         try:
             key = await asyncio.wait_for(key_q.get(), timeout=30.0)
             if key in ("QUIT", "DISCONNECT"):
+                outcome = "quit_welcome"
                 return
         except asyncio.TimeoutError:
             pass
         await _drain_keys(key_q)
 
         bucket = pick_bucket(cols, rows)
+        bucket.access_count += 1
+        bucket.active_clients += 1
 
         # --- play once ---
-        await _play_once(writer, key_q, peer, bucket, cols, rows, fps)
+        result, frames_played, play_skipped = await _play_once(
+            writer, key_q, peer, bucket, cols, rows, fps)
+        outcome = result.lower()
 
         # --- goodbye / BBS ad: held until keypress or timeout ---
         try:
@@ -907,14 +1036,28 @@ async def shell(reader, writer) -> None:
             pass
 
     finally:
+        if bucket is not None:
+            bucket.active_clients = max(0, bucket.active_clients - 1)
+        duration = time.monotonic() - t_connect
         _ACTIVE_CONNECTIONS -= 1
         _write_status()
+        evict_idle_caches()
+        _log_connection(
+            peer,
+            bucket_width=bucket.width if bucket else 0,
+            frames_played=frames_played,
+            total_frames=len(bucket.paths) if bucket else 0,
+            skipped=play_skipped,
+            duration=duration,
+            outcome=outcome,
+        )
         reader_task.cancel()
         try:
             writer.close()
         except Exception:
             pass
-        log.info("disconnect %s active=%d", peer, _ACTIVE_CONNECTIONS)
+        log.info("disconnect %s active=%d duration=%.0fs outcome=%s",
+                 peer, _ACTIVE_CONNECTIONS, duration, outcome)
 
 
 # ---------------------------------------------------------------- entrypoint
@@ -948,6 +1091,12 @@ def main() -> int:
     ap.add_argument("--status-file", type=Path, default=DEFAULT_STATUS_FILE,
                     help=f"live status file path (default {DEFAULT_STATUS_FILE}, "
                          f"overridable via $SRTELNET_STATUS_FILE)")
+    ap.add_argument("--connlog-file", type=Path, default=DEFAULT_CONNLOG_FILE,
+                    help=f"connection log CSV path (default {DEFAULT_CONNLOG_FILE}, "
+                         f"overridable via $SRTELNET_CONNLOG_FILE)")
+    ap.add_argument("--prewarm", type=int, default=80, metavar="WIDTH",
+                    help="pre-cache this bucket width at startup for instant "
+                         "first-client playback (default 80, set 0 to disable)")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="debug-level logging")
     args = ap.parse_args()
@@ -991,7 +1140,28 @@ def main() -> int:
     _write_status()  # write initial status on startup
     log.info("status file: %s", _STATUS_PATH)
 
+    global _CONNLOG_PATH
+    _CONNLOG_PATH = args.connlog_file
+    # Write CSV header if the file doesn't exist yet.
+    if _CONNLOG_PATH and not _CONNLOG_PATH.exists():
+        try:
+            _CONNLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _CONNLOG_PATH.write_text(
+                "timestamp,ip,bucket_width,frames_played,total_frames,"
+                "skipped,duration_s,outcome\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+    log.info("connection log: %s", _CONNLOG_PATH)
+
     load_all_buckets(args.frames)
+
+    # Pre-warm the most popular bucket so the very first client gets smooth
+    # playback without per-frame disk reads.
+    if args.prewarm and args.prewarm in BUCKETS:
+        prewarm_bucket(BUCKETS[args.prewarm])
+        _write_status()  # update status to show the cached bucket
 
     # Prefer uvloop if it's installed — drop-in replacement that runs the
     # asyncio event loop on libuv and is typically 2-4x faster than the
