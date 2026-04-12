@@ -646,7 +646,8 @@ def _write_status() -> None:
     if _STATUS_PATH is None:
         return
     try:
-        uptime_s = time.monotonic() - _SERVER_START_TIME
+        now = time.monotonic()
+        uptime_s = now - _SERVER_START_TIME
         h, rem = divmod(int(uptime_s), 3600)
         m, s = divmod(rem, 60)
         # Bucket details: cache state, popularity, active clients.
