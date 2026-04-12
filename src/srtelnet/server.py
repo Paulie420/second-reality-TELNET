@@ -42,19 +42,20 @@ DEFAULT_FPS = 20.0
 DEFAULT_FRAMES_ROOT = Path(os.environ.get("SRTELNET_FRAMES", "frames"))
 BUCKETS_ORDER = (40, 60, 80, 100, 120, 140, 160, 180, 200)
 # Trim the trailing "GRAPHICS/MUSIC/CODE" credit card off the short bake.
-# ffmpeg blackdetect puts the last black segment end at 508.274s -> frame 10165
-# at 20 fps (was 15249 at 30 fps). Back off by 3 frames (~0.15s at 20 fps) so
-# the last frame the end-hold freezes on is solidly inside the final black
-# stretch.
-DEFAULT_MAX_FRAMES = 10163
+# ffmpeg blackdetect puts the last black segment end at 508.274s -> frame 15249,
+# but in practice the credit text starts fading in a few frames earlier than
+# that, so leaning on 15249 held ~2-3 frames of ghost text on screen during
+# the end-hold. Back off by 5 frames (~0.17s at 30 fps) so the last frame
+# the end-hold freezes on is solidly inside the final black stretch.
+DEFAULT_MAX_FRAMES = 15244
 # Frame ranges to skip entirely during playback. Each (start, end) removes
 # frames [start, end) from the playback index. Default cuts 11s out of the
-# 15.2s static landscape section at 44.87s-55.87s (ffmpeg freezedetect),
+# 15.2s static landscape section at 42.76s-57.97s (ffmpeg freezedetect),
 # centered so ~2.1s of stillness remains on each side of the cut. The demo
 # plays quiet music-only pauses during this stretch which we can't reproduce
 # over telnet, so skipping most of it keeps the viewer engaged without an
-# abrupt splice. Values are for 20 fps (was 1346-1676 at 30 fps).
-DEFAULT_SKIPS: list[tuple[int, int]] = [(897, 1117)]
+# abrupt splice.
+DEFAULT_SKIPS: list[tuple[int, int]] = [(1346, 1676)]
 # After the last frame, hold the final image on screen for this many seconds
 # before transitioning to the goodbye message. Compensates for the fact that
 # MAX_FRAMES = 15249 stops a hair before the video technically ends.
