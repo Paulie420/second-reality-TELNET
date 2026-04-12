@@ -46,6 +46,10 @@ DEFAULT_WIDTHS = (40, 60, 80, 100, 120, 140, 160, 180, 200)
 DEFAULT_FPS = 30
 DEFAULT_CELL_ASPECT = 2.0  # terminal cells are ~2x taller than wide
 DEFAULT_SYMBOLS = "block+border+space"  # matches 1984.ws visual style
+DEFAULT_COLORS = "full"  # chafa -c value; "full" = truecolor, "256" = 8-bit palette
+# Accepted chafa -c values — passed through as-is so we don't have to track
+# chafa's full matrix ourselves. Common useful ones: full, 256, 240, 16, 8, 2.
+VALID_COLORS = ("full", "256", "240", "16", "8", "2", "none", "16/8")
 
 
 def check_tools() -> None:
@@ -125,10 +129,10 @@ def extract_frames(video: Path, fps: int, tmp_dir: Path) -> list[Path]:
     return frames
 
 
-def bake_one(job: tuple[Path, Path, int, int, str]) -> str:
+def bake_one(job: tuple[Path, Path, int, int, str, str]) -> str:
     """Single worker: render one PNG through chafa and write the ANSI to disk.
     Returns the output path (or empty string if skipped)."""
-    png, out_path, width, height, symbols = job
+    png, out_path, width, height, symbols, colors = job
     if out_path.exists() and out_path.stat().st_size > 0:
         return ""  # already baked, resume-safe
     with open(out_path, "wb") as f:
@@ -137,7 +141,7 @@ def bake_one(job: tuple[Path, Path, int, int, str]) -> str:
                 "chafa",
                 "--format", "symbols",
                 "--symbols", symbols,
-                "-c", "full",
+                "-c", colors,
                 "--size", f"{width}x{height}",
                 str(png),
             ],
@@ -152,6 +156,7 @@ def bake_bucket(
     height: int,
     out_dir: Path,
     symbols: str,
+    colors: str,
     workers: int,
 ) -> None:
     """Render every extracted PNG into out_dir at the given cell grid, in
@@ -159,10 +164,10 @@ def bake_bucket(
     for up to ~1 million frames per bucket."""
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    jobs: list[tuple[Path, Path, int, int, str]] = []
+    jobs: list[tuple[Path, Path, int, int, str, str]] = []
     for n, png in enumerate(frames):
         out_path = out_dir / f"frame-{n:05x}.ans"
-        jobs.append((png, out_path, width, height, symbols))
+        jobs.append((png, out_path, width, height, symbols, colors))
 
     print(
         f"[bake {width}x{height}] {len(jobs)} frames → {out_dir} "
@@ -216,6 +221,14 @@ def main() -> int:
         help=f"chafa --symbols value (default '{DEFAULT_SYMBOLS}')",
     )
     ap.add_argument(
+        "--colors", type=str, default=DEFAULT_COLORS,
+        choices=VALID_COLORS,
+        help=f"chafa -c value (default '{DEFAULT_COLORS}'). 'full' is 24-bit "
+             f"truecolor (biggest wire footprint, maximum fidelity); '256' "
+             f"uses chafa's 8-bit palette (~30-40%% smaller on color-heavy "
+             f"frames, still looks great on modern terminals).",
+    )
+    ap.add_argument(
         "--output", type=Path, default=Path("frames"),
         help="output directory root (default ./frames)",
     )
@@ -255,7 +268,8 @@ def main() -> int:
         widths = tuple(int(w) for w in args.widths.split(","))
 
     print(
-        f"[plan] {len(widths)} bucket(s): "
+        f"[plan] {len(widths)} bucket(s) @ {args.colors} color, "
+        f"symbols='{args.symbols}': "
         + ", ".join(
             f"{w}x{compute_height(w, src_w, src_h, args.cell_aspect)}"
             for w in widths
@@ -272,6 +286,7 @@ def main() -> int:
             height=h,
             out_dir=args.output / str(w),
             symbols=args.symbols,
+            colors=args.colors,
             workers=args.workers,
         )
     total_dt = time.time() - total_t0
