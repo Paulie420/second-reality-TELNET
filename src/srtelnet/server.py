@@ -83,6 +83,11 @@ DRAIN_TIMEOUT = 30.0
 WRITE_BUF_HIGH = 1024 * 1024   # 1 MB: drain blocks above this
 WRITE_BUF_LOW = 256 * 1024     # 256 KB: drain returns below this
 WRITE_BUF_SKIP = 512 * 1024    # 512 KB: skip next frame above this
+# If a client is so slow that we skip this many consecutive frames, they
+# are effectively dead (or on a connection that can't sustain even a
+# trickle). Disconnect gracefully instead of burning server resources
+# writing into a void.
+MAX_CONSEC_SKIP = 300           # ~10s at 30fps
 # Path to the persistent lifetime connection counter. Relative to the
 # server's working directory. Overridable via --counter-file or the
 # SRTELNET_COUNTER_FILE env var. Stored as a plain ASCII integer.
@@ -629,6 +634,7 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> str:
     paused = False
     target = loop.time()
     skipped = 0
+    consec_skip = 0
 
     while i < n_frames:
         # Live NAWS resize handling. telnetlib3 updates the extra_info dict
@@ -714,14 +720,28 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> str:
         # skip-frame rate track real network speed instead of wall clock.
         if _write_buffer_size(writer) > WRITE_BUF_SKIP:
             skipped += 1
+            consec_skip += 1
+            if consec_skip > MAX_CONSEC_SKIP:
+                log.info("%s %d consecutive skips, giving up", peer, consec_skip)
+                return "DISCONNECT"
             i += 1
             target += frame_interval
             continue
 
+        consec_skip = 0  # client is keeping up, reset the dead-client counter
+
         try:
             lines = read_frame(bucket, i)
             writer.write(render_frame_at(lines, top, left))
-            await _drain_bounded(writer)
+            try:
+                await _drain_bounded(writer)
+            except ConnectionResetError:
+                # drain timeout — client is very slow but maybe not dead.
+                # Don't disconnect; let the buffer-size skip at the top of
+                # the loop handle flow control. If the client is truly gone,
+                # consecutive skips will eventually trip MAX_CONSEC_SKIP.
+                log.debug("%s drain timeout (buf=%d), skipping drain",
+                          peer, _write_buffer_size(writer))
         except (ConnectionResetError, BrokenPipeError):
             return "DISCONNECT"
         except Exception as e:
