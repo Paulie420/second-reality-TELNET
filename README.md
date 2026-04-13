@@ -55,10 +55,14 @@ This project owes its existence to two things:
    accepts connections, reads window size from
    [RFC 1073 NAWS](https://www.rfc-editor.org/rfc/rfc1073), picks the biggest bucket
    that fits, and pumps frames at the configured fps. The play loop watches for
-   fresh NAWS updates and switches buckets on the fly when you resize. Slow clients
-   get fewer frames — the loop drops them rather than queueing — so playback stays
-   in sync instead of wedging. WAN clients benefit from drain-on-seek, tight write
-   buffers, and `TCP_NODELAY`; see [`docs/performance-tuning.md`](docs/performance-tuning.md).
+   fresh NAWS updates and switches buckets on the fly when you resize. Slow WAN
+   clients self-adapt: after a couple seconds of sustained backpressure the server
+   auto-downgrades them to the next-smaller bucket (and auto-upgrades back once
+   their link recovers for a while, capped at their window size). On top of that,
+   drain-on-seek, tight write-buffer watermarks, and `TCP_NODELAY`+`TCP_QUICKACK`
+   keep keystroke-to-render latency bounded. See
+   [`docs/performance-tuning.md`](docs/performance-tuning.md) for the full
+   treatment.
 3. **Deploy.** Unprivileged Debian 12 LXC on Proxmox, bound to TCP 23 via
    `setcap cap_net_bind_service=+ep`. Public traffic goes through an
    nginx-proxy-manager TCP stream. Operators choose 20 or 30 fps at deploy time
@@ -109,8 +113,9 @@ server without a redeploy — see [`docs/deploy.md`](docs/deploy.md#switching-fp
   including 20fps vs 30fps options and baking both for runtime switching.
 - [`docs/deploy.md`](docs/deploy.md) — Proxmox LXC setup, systemd unit, port 23
   binding, firewall notes, and the `switch_fps.sh` flip workflow.
-- [`docs/performance-tuning.md`](docs/performance-tuning.md) — WAN-client latency
-  analysis, tiered optimization plan, what's shipped vs. what's pending.
+- [`docs/performance-tuning.md`](docs/performance-tuning.md) — retrospective on
+  the WAN-client optimizations that shipped: root-cause analysis, what each
+  change does, and how to verify them.
 - [`docs/credits.md`](docs/credits.md) — Future Crew, Jeff Quast, and everything else
   this project stands on.
 

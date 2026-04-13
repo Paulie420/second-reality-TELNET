@@ -72,17 +72,54 @@ updated: 2026-04-12 20:15:03
 Every completed connection appends one line to `state/connections.csv`:
 
 ```
-timestamp,ip,bucket_width,frames_played,total_frames,skipped,duration_s,outcome
-2026-04-12 14:30:01,203.0.113.5,80,14914,14914,12,512.3,done
-2026-04-12 14:31:45,198.51.100.2,120,4200,14914,0,140.8,quit
+timestamp,ip,bucket_width,frames_played,total_frames,skipped,duration_s,outcome,peak_buffer_kb,seek_count,final_bucket_width
+2026-04-12 14:30:01,203.0.113.5,80,14914,14914,12,512.3,done,32,0,80
+2026-04-12 14:31:45,198.51.100.2,120,4200,14914,0,140.8,quit,4,2,120
+2026-04-13 09:18:22,1.2.3.4,180,14914,14914,412,528.0,done,210,1,140
 ```
 
-Fields:
-- **bucket_width**: which resolution bucket was served
+Fields (columns 1–8 are the original schema; 9–11 were added with the
+Tier-2 telemetry work and are populated on all new rows):
+
+- **bucket_width**: resolution bucket the session *started* on (NAWS-picked)
 - **frames_played**: how far the viewer got before disconnecting
-- **skipped**: frames dropped due to backpressure (slow client)
+- **total_frames**: length of the current fps bake (9943 at 20 fps, 14914 at 30 fps)
+- **skipped**: frames dropped due to wall-clock lag or backpressure
 - **duration_s**: total connection time in seconds
 - **outcome**: `done` (watched it all), `quit` (pressed q), `disconnect`
+  (link failure), `quit_welcome` (left on the welcome screen), `too_small`
+  (terminal below 40x20 minimum)
+- **peak_buffer_kb** *(new)*: high-water mark of the transport send-buffer
+  during playback. 0 means the client kept up throughout; higher values
+  mean the client was behind at some point. A good proxy for "how
+  stressed was the link."
+- **seek_count** *(new)*: number of `←` / `→` keystrokes issued during
+  playback. Proxy for engagement and whether seek-on-WAN was responsive
+  enough to use.
+- **final_bucket_width** *(new)*: bucket width the session *ended* on.
+  Equal to `bucket_width` unless the server auto-downgraded mid-stream
+  due to sustained backpressure. A session where these differ is
+  evidence the adaptive bucket-downgrade feature engaged.
+
+Old pre-telemetry rows are still readable — `tools/stats25.sh` renders
+a `-` placeholder for the missing columns and keeps the table aligned.
+
+### Example queries
+
+```bash
+# How often does the adaptive downgrade engage?
+awk -F, 'NR>1 && $3 != $11 && $11 != "" {n++} END {print n, "downgrade sessions"}' \
+    ~/second-reality-TELNET/state/connections.csv
+
+# What's the peak buffer distribution (proxy for WAN client stress)?
+awk -F, 'NR>1 && $9 != "" {print $9}' \
+    ~/second-reality-TELNET/state/connections.csv | sort -n | uniq -c
+
+# Are viewers using seek?
+awk -F, 'NR>1 && $10 != "" {tot += $10; n++} END {
+    if (n) printf "%d sessions, %.2f avg seeks/session\n", n, tot/n}' \
+    ~/second-reality-TELNET/state/connections.csv
+```
   (connection dropped), `quit_welcome` (quit on welcome screen),
   `too_small` (terminal too small)
 
