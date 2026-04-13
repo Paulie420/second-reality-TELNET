@@ -43,20 +43,25 @@ DEFAULT_FPS = 30.0
 DEFAULT_FRAMES_ROOT = Path(os.environ.get("SRTELNET_FRAMES", "frames-30fps"))
 BUCKETS_ORDER = (40, 60, 80, 100, 120, 140, 160, 180, 200)
 # Trim the trailing "GRAPHICS/MUSIC/CODE" credit card off the short bake.
-# ffmpeg blackdetect puts the last black segment end at 508.274s -> frame 15249,
-# but in practice the credit text starts fading in a few frames earlier than
-# that, so leaning on 15249 held ~2-3 frames of ghost text on screen during
-# the end-hold. Back off by 5 frames (~0.17s at 30 fps) so the last frame
-# the end-hold freezes on is solidly inside the final black stretch.
-DEFAULT_MAX_FRAMES = 15244
-# Frame ranges to skip entirely during playback. Each (start, end) removes
-# frames [start, end) from the playback index. Default cuts 11s out of the
-# 15.2s static landscape section at 42.76s-57.97s (ffmpeg freezedetect),
-# centered so ~2.1s of stillness remains on each side of the cut. The demo
-# plays quiet music-only pauses during this stretch which we can't reproduce
-# over telnet, so skipping most of it keeps the viewer engaged without an
-# abrupt splice.
-DEFAULT_SKIPS: list[tuple[int, int]] = [(1346, 1676)]
+# Stored in SECONDS (not frames) so the same default works at any fps —
+# multiplied by --fps at startup. ffmpeg blackdetect puts the last black
+# segment end at 508.274s, but in practice the credit text starts fading
+# in a few frames earlier, so back off a hair (~0.13s) to land solidly
+# inside the final black stretch.
+DEFAULT_MAX_SECONDS = 508.13
+# Frame ranges to skip entirely during playback, in SECONDS. Each
+# (start, end) cuts that wall-clock range out of the bake. Default cuts
+# the 11s of the 15.2s static landscape section at 42.76s-57.97s
+# (ffmpeg freezedetect), centered so ~2.1s of stillness remains on each
+# side of the cut. The demo plays quiet music-only pauses during this
+# stretch which we can't reproduce over telnet, so skipping most of it
+# keeps the viewer engaged without an abrupt splice.
+#
+# These seconds are multiplied by --fps at startup to produce the
+# actual frame-index ranges applied during bucket indexing, so the same
+# defaults give the correct visual edit at 20 fps (897:1117),
+# 30 fps (1346:1676), or any other rate.
+DEFAULT_SKIP_SECONDS: list[tuple[float, float]] = [(44.87, 55.87)]
 # After the last frame, hold the final image on screen for this many seconds
 # before transitioning to the goodbye message. Compensates for the fact that
 # MAX_FRAMES = 15249 stops a hair before the video technically ends.
@@ -1156,15 +1161,18 @@ def main() -> int:
                          "or $SRTELNET_FRAMES)")
     ap.add_argument("--fps", type=float, default=DEFAULT_FPS,
                     help=f"playback frame rate (default {DEFAULT_FPS})")
-    ap.add_argument("--max-frames", type=int, default=DEFAULT_MAX_FRAMES,
-                    help=f"stop playback at frame N (default {DEFAULT_MAX_FRAMES}, "
-                         "trims the trailing credit card off the short bake; "
-                         "set 0 to play every baked frame)")
+    ap.add_argument("--max-frames", type=int, default=None,
+                    help="stop playback at frame N (default: auto-derived "
+                         f"from --fps — wall-clock "
+                         f"{DEFAULT_MAX_SECONDS:.2f}s trims the trailing "
+                         "credit card off the short bake. Set 0 to play every "
+                         "baked frame.)")
     ap.add_argument("--skip", action="append", default=None,
                     metavar="START:END",
                     help="drop frames [START, END) from playback (can be "
-                         "repeated). Default skips the 11s still landscape "
-                         "section. Pass '--skip none' to disable all skips.")
+                         "repeated). Default auto-derives from --fps — "
+                         "cuts the 11s still landscape section at 44.87s-"
+                         "55.87s. Pass '--skip none' to disable all skips.")
     ap.add_argument("--counter-file", type=Path, default=DEFAULT_COUNTER_FILE,
                     help=f"persistent lifetime connection counter file "
                          f"(default {DEFAULT_COUNTER_FILE}, overridable via "
@@ -1189,10 +1197,25 @@ def main() -> int:
     )
 
     global MAX_FRAMES, SKIPS
-    MAX_FRAMES = args.max_frames if args.max_frames > 0 else None
+    # --max-frames: None (default) => auto-derive from fps. 0 => disable.
+    # positive integer => use as-is.
+    if args.max_frames is None:
+        MAX_FRAMES = round(DEFAULT_MAX_SECONDS * args.fps)
+        log.info("max-frames auto-derived from fps: %d (%.2fs @ %g fps)",
+                 MAX_FRAMES, DEFAULT_MAX_SECONDS, args.fps)
+    elif args.max_frames > 0:
+        MAX_FRAMES = args.max_frames
+    else:
+        MAX_FRAMES = None
 
+    # --skip: None (default) => auto-derive DEFAULT_SKIP_SECONDS from fps.
+    # Explicit START:END values are taken as literal frame indices.
+    # --skip none => no skips.
     if args.skip is None:
-        SKIPS = list(DEFAULT_SKIPS)
+        SKIPS = [(round(s * args.fps), round(e * args.fps))
+                 for s, e in DEFAULT_SKIP_SECONDS]
+        if SKIPS:
+            log.info("skip ranges auto-derived from fps: %s", SKIPS)
     elif len(args.skip) == 1 and args.skip[0].lower() == "none":
         SKIPS = []
     else:
@@ -1203,8 +1226,8 @@ def main() -> int:
                 SKIPS.append((int(a), int(b)))
             except ValueError:
                 sys.exit(f"[error] bad --skip value: {s!r} (expected START:END)")
-    if SKIPS:
-        log.info("playback skips: %s", SKIPS)
+        if SKIPS:
+            log.info("playback skips: %s", SKIPS)
 
     # FPS is read from env var inside the shell coroutine so the admin can
     # override without code changes. Stash the CLI choice there.

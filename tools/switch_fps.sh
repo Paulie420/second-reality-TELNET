@@ -176,9 +176,7 @@ WorkingDirectory=$ROOT
 ExecStart=$VENV_PY -m srtelnet.server \\
     --port 2323 \\
     --frames $FRAMES_20 \\
-    --fps 20 \\
-    --max-frames 10163 \\
-    --skip 897:1117
+    --fps 20
 Restart=on-failure
 RestartSec=3
 StandardOutput=journal

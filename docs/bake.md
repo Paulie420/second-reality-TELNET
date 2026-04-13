@@ -136,21 +136,23 @@ python tools/bake_frames.py second_reality_short.webm \
 Output: `frames-20fps/40/`, `frames-20fps/60/`, …, `frames-20fps/200/`.
 ~10k frames per bucket. ~9.4 GB total.
 
-When running the server against a 20fps bake, pass the scaled
-end-trim and skip flags so the wall-clock edits match the 30fps
-default:
+When running the server against a 20fps bake, only `--fps 20` is
+required — the end-trim and skip range auto-scale from the wall-clock
+defaults (`DEFAULT_MAX_SECONDS = 508.13`, `DEFAULT_SKIP_SECONDS = [(44.87, 55.87)]`)
+at whatever rate you pick:
 
 ```bash
 python -m srtelnet.server \
     --frames frames-20fps \
-    --fps 20 \
-    --max-frames 10163 \
-    --skip 897:1117
+    --fps 20
 ```
 
-(Those numbers are `DEFAULT_MAX_FRAMES × 20/30` and the skip range
-scaled to 20fps; `tools/switch_fps.sh` bakes them into the systemd unit
-automatically when you flip.)
+Logs will show the auto-derived frame values, e.g.
+`max-frames auto-derived from fps: 10163 (508.13s @ 20 fps)` and
+`skip ranges auto-derived from fps: [(897, 1117)]`. Pass `--max-frames N`
+or `--skip START:END` to override explicitly (e.g. for a bake from a
+different source video with different end/skip timing). `--skip none`
+disables the default skip entirely.
 
 ### Bake both at once
 

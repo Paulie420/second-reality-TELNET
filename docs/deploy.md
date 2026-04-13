@@ -94,9 +94,9 @@ source .venv/bin/activate
 # 30fps run:
 python -m srtelnet.server --port 2323 --frames ./frames-30fps
 
-# OR 20fps run (scale the end-trim and skip to 20fps):
-python -m srtelnet.server --port 2323 --frames ./frames-20fps \
-    --fps 20 --max-frames 10163 --skip 897:1117
+# OR 20fps run (only --fps changes — end-trim and skip range auto-scale
+# from DEFAULT_MAX_SECONDS / DEFAULT_SKIP_SECONDS in server.py):
+python -m srtelnet.server --port 2323 --frames ./frames-20fps --fps 20
 ```
 
 You should see `listening on 0.0.0.0:2323` and the per-bucket load lines.
@@ -161,7 +161,8 @@ without a redeploy or a rebake — provided both frame sets have been
 shipped to the LXC at least once. `switch_fps.sh` handles:
 
 - Writing a fresh systemd unit for the target fps (with the correct
-  `--fps`, `--max-frames`, `--skip`, and `--frames` path).
+  `--fps` and `--frames` path; the end-trim and skip range auto-scale
+  from the wall-clock defaults in `server.py` based on `--fps`).
 - `daemon-reload` and `restart`.
 - **Auto-archiving the inactive fps** to `archives/frames-NNfps.tar.zst`
   and removing the uncompressed copy, reclaiming disk.

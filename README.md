@@ -138,8 +138,9 @@ python tools/play.py frames-30fps/120
 
 # run the telnet server on a non-privileged port for local testing
 # (defaults to ./frames-30fps at 30fps; for 20fps run:
-#    python -m srtelnet.server --port 2323 --frames ./frames-20fps \
-#        --fps 20 --max-frames 10163 --skip 897:1117)
+#    python -m srtelnet.server --port 2323 --frames ./frames-20fps --fps 20
+# — the end-trim and skip range auto-scale from DEFAULT_MAX_SECONDS /
+# DEFAULT_SKIP_SECONDS at whatever --fps you pick.)
 python -m srtelnet.server --port 2323
 
 # then, from another terminal:
