@@ -1,6 +1,6 @@
 [project]
 name = "srtelnet"
-version = "0.1.0"
+version = "1.0.0"
 description = "Stream Future Crew's Second Reality (1993) as pre-rendered ANSI frames over telnet."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -10,7 +10,7 @@ authors = [
 ]
 keywords = ["telnet", "demoscene", "ansi", "chafa", "second-reality", "blessed", "telnetlib3"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "License :: Public Domain",
     "Operating System :: POSIX :: Linux",
