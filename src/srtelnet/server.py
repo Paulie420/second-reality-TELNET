@@ -502,12 +502,13 @@ def render_welcome(
     add("\u2502   \u2190 / \u2192             seek -/+ 5 seconds   \u2502", _C_WHITE)
     add("\u2514" + "\u2500" * 42 + "\u2518", _C_DIM)
 
-    # --- signoff + prompt (2 rows)
+    # --- signoff + source + prompt (3 rows)
     add("streamed by paulie420  \u00b7  20forbeers.com", _C_GREEN)
+    add("source:  github.com/Paulie420/second-reality-TELNET", _C_DIM)
     add(">>>   PRESS ANY KEY TO JACK IN   <<<", _BOLD + _BLINK + _C_PINK)
     # Total: 8 (banner) + 3 (subtitle) + 1 (stats) + 1 (credits) + 1 (gap)
-    # + 5 (controls) + 2 (signoff) = 21 rows. Centered in 25 gives 2-row
-    # top margin + 2-row bottom margin.
+    # + 5 (controls) + 3 (signoff+source+prompt) = 22 rows. Centered in 25
+    # gives 1-row top + 2-row bottom margin.
 
     n = len(raw)
     top = max(0, (rows - n) // 2)
@@ -553,8 +554,9 @@ def render_goodbye(
         stats = "[ thanks for jacking in ]"
     add(stats, _C_CYAN)
 
-    # --- BBS ad block (7 rows)
+    # --- BBS ad block (8 rows)
     add("WEBSITE :  20ForBeers.com", _C_WHITE)
+    add("GITHUB  :  github.com/Paulie420/second-reality-TELNET", _C_DIM)
     add("An ANSi TELNET BBS:", _C_DIM)
     add("TELNET  :  20ForBeers.com:1337", _C_CYAN)
     add("SSH     :  20ForBeers.com:1338", _C_CYAN)
@@ -562,8 +564,9 @@ def render_goodbye(
     add("'Dial-in' Today!", _C_GREEN + _BOLD)
     # Classic modem drop — one last BBS callback on the way out
     add("NO CARRIER", _BOLD + _C_PINK)
-    # Total: 8 + 3 + 1 + 4 + 1 + 1 + 1 = 19 rows. Plus top/bottom margin
-    # auto-centered by the rows - n math below.
+    # Total: 8 (banner) + 3 (subtitle) + 1 (stats) + 5 (addresses) +
+    # 1 (gap) + 1 ('Dial-in') + 1 (NO CARRIER) = 20 rows. Plus top/
+    # bottom margin auto-centered by the rows - n math below.
 
     n = len(raw)
     top = max(1, (rows - n) // 2)
