@@ -812,9 +812,15 @@ def _configure_socket(writer) -> None:
         log.debug("socket setsockopt failed: %s", e)
 
 
-async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str, int, int]:
-    """Play the demo once through and return (status, frames_played, skipped).
-    Status is 'QUIT', 'DISCONNECT', or 'DONE'."""
+async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str, int, int, int, int, int]:
+    """Play the demo once through and return
+    (status, frames_played, skipped, peak_buffer_kb, seek_count,
+     final_bucket_width).
+
+    Status is 'QUIT', 'DISCONNECT', or 'DONE'. The last four fields are
+    per-session telemetry written to the CSV in _log_connection() for
+    post-hoc analytics and to measure whether WAN-side optimizations
+    are actually helping."""
     loop = asyncio.get_event_loop()
     frame_interval = 1.0 / fps
     seek_frames = int(5 * fps)
@@ -829,7 +835,7 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
     try:
         await _drain_bounded(writer)
     except (ConnectionResetError, BrokenPipeError):
-        return ("DISCONNECT", 0, 0)
+        return ("DISCONNECT", 0, 0, 0, 0, bucket.width)
 
     i = 0
     paused = False
@@ -840,6 +846,12 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
     # the backpressure skip, so the target frame is guaranteed to land even
     # on a slow link. Reset to False after the post-seek frame goes out.
     force_next_frame = False
+    # Per-session telemetry. Written to state/connections.csv in
+    # _log_connection() on disconnect. peak_buffer_kb tracks the high-water
+    # mark of the transport send-buffer occupancy (proxy for "how backed up
+    # did this client get"). seek_count counts LEFT/RIGHT keystrokes.
+    peak_buffer_kb = 0
+    seek_count = 0
 
     while i < n_frames:
         # Live NAWS resize handling. telnetlib3 updates the extra_info dict
@@ -869,7 +881,7 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
             try:
                 await _drain_bounded(writer)
             except (ConnectionResetError, BrokenPipeError):
-                return ("DISCONNECT", i, skipped)
+                return ("DISCONNECT", i, skipped, peak_buffer_kb, seek_count, bucket.width)
             target = loop.time()  # resync the frame clock after the wipe
 
         resync = False
@@ -880,7 +892,7 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
             except asyncio.QueueEmpty:
                 break
             if key in ("QUIT", "DISCONNECT"):
-                return (key, i, skipped)
+                return (key, i, skipped, peak_buffer_kb, seek_count, bucket.width)
             if key == "SPACE":
                 paused = not paused
                 resync = True
@@ -888,10 +900,12 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
                 i = max(0, i - seek_frames)
                 resync = True
                 seeked = True
+                seek_count += 1
             elif key == "RIGHT":
                 i = min(n_frames - 1, i + seek_frames)
                 resync = True
                 seeked = True
+                seek_count += 1
 
         # On seek (LEFT/RIGHT): the TCP send buffer may already hold a
         # backlog of pre-seek frames that will paint on the client
@@ -913,7 +927,7 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
             try:
                 writer.write(CLEAR + HOME)
             except (ConnectionResetError, BrokenPipeError):
-                return "DISCONNECT"
+                return ("DISCONNECT", i, skipped, peak_buffer_kb, seek_count, bucket.width)
             seek_deadline = loop.time() + 1.5
             while (_write_buffer_size(writer) > WRITE_BUF_LOW
                    and loop.time() < seek_deadline):
@@ -926,14 +940,16 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
             except asyncio.TimeoutError:
                 continue
             if key in ("QUIT", "DISCONNECT"):
-                return (key, i, skipped)
+                return (key, i, skipped, peak_buffer_kb, seek_count, bucket.width)
             if key == "SPACE":
                 paused = False
                 target = loop.time()
             elif key == "LEFT":
                 i = max(0, i - seek_frames)
+                seek_count += 1
             elif key == "RIGHT":
                 i = min(n_frames - 1, i + seek_frames)
+                seek_count += 1
             continue
 
         if resync:
@@ -956,13 +972,16 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
         # Exception: the first frame after a seek bypasses the skip so
         # the target frame is guaranteed to land — otherwise on a slow
         # link the seek would drop its own target frame.
-        if (not force_next_frame
-                and _write_buffer_size(writer) > WRITE_BUF_SKIP):
+        buf = _write_buffer_size(writer)
+        buf_kb = buf // 1024
+        if buf_kb > peak_buffer_kb:
+            peak_buffer_kb = buf_kb
+        if (not force_next_frame and buf > WRITE_BUF_SKIP):
             skipped += 1
             consec_skip += 1
             if consec_skip > MAX_CONSEC_SKIP:
                 log.info("%s %d consecutive skips, giving up", peer, consec_skip)
-                return ("DISCONNECT", i, skipped)
+                return ("DISCONNECT", i, skipped, peak_buffer_kb, seek_count, bucket.width)
             i += 1
             target += frame_interval
             continue
@@ -983,10 +1002,10 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
                 log.debug("%s drain timeout (buf=%d), skipping drain",
                           peer, _write_buffer_size(writer))
         except (ConnectionResetError, BrokenPipeError):
-            return ("DISCONNECT", i, skipped)
+            return ("DISCONNECT", i, skipped, peak_buffer_kb, seek_count, bucket.width)
         except Exception as e:
             log.warning("%s frame %d read/write error: %s", peer, i, e)
-            return ("DISCONNECT", i, skipped)
+            return ("DISCONNECT", i, skipped, peak_buffer_kb, seek_count, bucket.width)
 
         i += 1
         target += frame_interval
@@ -996,7 +1015,7 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
         await asyncio.sleep(DEFAULT_END_HOLD)
     except asyncio.CancelledError:
         pass
-    return ("DONE", n_frames, skipped)
+    return ("DONE", n_frames, skipped, peak_buffer_kb, seek_count, bucket.width)
 
 
 async def _drain_keys(key_q: asyncio.Queue) -> None:
@@ -1010,11 +1029,31 @@ async def _drain_keys(key_q: asyncio.Queue) -> None:
 
 def _log_connection(peer, bucket_width: int, frames_played: int,
                     total_frames: int, skipped: int,
-                    duration: float, outcome: str) -> None:
+                    duration: float, outcome: str,
+                    peak_buffer_kb: int = 0, seek_count: int = 0,
+                    final_bucket_width: int = 0) -> None:
     """Append one line to the connection log CSV. Best-effort — if the file
     can't be written we just skip it. The CSV is meant for post-hoc analytics:
     which buckets are popular, how many viewers watch the whole thing, where
-    in the world are they connecting from, etc."""
+    in the world are they connecting from, and (via the telemetry fields)
+    whether WAN-side optimizations are actually helping.
+
+    Columns:
+      timestamp,ip,bucket_width,frames_played,total_frames,skipped,
+      duration_s,outcome,peak_buffer_kb,seek_count,final_bucket_width
+
+    peak_buffer_kb   high-water mark of the transport send-buffer
+                     occupancy during playback (proxy for "how backed
+                     up did this client get"). 0 = fast client /
+                     no backpressure observed.
+    seek_count       number of LEFT/RIGHT keystrokes during playback
+                     (proxy for user engagement / whether they found
+                     the seek UX usable).
+    final_bucket_width
+                     the bucket width the session ENDED on. Equal to
+                     bucket_width (the starting bucket) unless the
+                     server auto-downgraded mid-stream due to sustained
+                     backpressure."""
     if _CONNLOG_PATH is None:
         return
     try:
@@ -1023,7 +1062,8 @@ def _log_connection(peer, bucket_width: int, frames_played: int,
         line = (
             f"{time.strftime('%Y-%m-%d %H:%M:%S')},"
             f"{ip},{bucket_width},{frames_played},{total_frames},"
-            f"{skipped},{duration:.1f},{outcome}\n"
+            f"{skipped},{duration:.1f},{outcome},"
+            f"{peak_buffer_kb},{seek_count},{final_bucket_width}\n"
         )
         with open(_CONNLOG_PATH, "a", encoding="utf-8") as f:
             f.write(line)
@@ -1064,6 +1104,9 @@ async def shell(reader, writer) -> None:
     outcome = "disconnect"
     frames_played = 0
     play_skipped = 0
+    peak_buffer_kb = 0
+    seek_count = 0
+    final_bucket_width = 0
 
     key_q: asyncio.Queue = asyncio.Queue()
     reader_task = asyncio.create_task(key_reader(reader, key_q))
@@ -1112,7 +1155,8 @@ async def shell(reader, writer) -> None:
         bucket.active_clients += 1
 
         # --- play once ---
-        result, frames_played, play_skipped = await _play_once(
+        (result, frames_played, play_skipped, peak_buffer_kb,
+         seek_count, final_bucket_width) = await _play_once(
             writer, key_q, peer, bucket, cols, rows, fps)
         outcome = result.lower()
 
@@ -1143,6 +1187,11 @@ async def shell(reader, writer) -> None:
             skipped=play_skipped,
             duration=duration,
             outcome=outcome,
+            peak_buffer_kb=peak_buffer_kb,
+            seek_count=seek_count,
+            final_bucket_width=(final_bucket_width
+                                if final_bucket_width
+                                else (bucket.width if bucket else 0)),
         )
         reader_task.cancel()
         try:
@@ -1258,13 +1307,17 @@ def main() -> int:
 
     global _CONNLOG_PATH
     _CONNLOG_PATH = args.connlog_file
-    # Write CSV header if the file doesn't exist yet.
+    # Write CSV header if the file doesn't exist yet. Existing CSVs from
+    # pre-instrumentation builds use the 8-column schema and are still
+    # readable by the stats scripts; new rows add peak_buffer_kb,
+    # seek_count, and final_bucket_width as columns 9-11.
     if _CONNLOG_PATH and not _CONNLOG_PATH.exists():
         try:
             _CONNLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             _CONNLOG_PATH.write_text(
                 "timestamp,ip,bucket_width,frames_played,total_frames,"
-                "skipped,duration_s,outcome\n",
+                "skipped,duration_s,outcome,peak_buffer_kb,seek_count,"
+                "final_bucket_width\n",
                 encoding="utf-8",
             )
         except OSError:

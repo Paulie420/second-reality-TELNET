@@ -20,9 +20,21 @@ if [ -f "$SR/state/status.txt" ]; then
     grep -E "active conn|peak conn|session|lifetime|cache policy|[0-9]+w:|buckets:" "$SR/state/status.txt"
 fi
 echo "----------------------------------------"
-echo " last 5 connections:"
+echo " last 5 connections (  date   start/end    dur  pk  sk  out  )"
 if [ -f "$SR/state/connections.csv" ]; then
-    tail -5 "$SR/state/connections.csv" | grep -v '^timestamp' | awk -F, '{printf " %-11s %3sw %5ss %s\n", $1, $3, $7, $8}'
+    # Columns: 1=ts 3=start_bucket 7=duration 8=outcome
+    # 9=peak_buf_kb 10=seek_count 11=final_bucket (added post c3d2b72).
+    # Rows written by pre-instrumentation builds lack cols 9-11; awk
+    # prints a "-" placeholder so the table stays aligned either way.
+    tail -5 "$SR/state/connections.csv" | grep -v '^timestamp' | awk -F, '
+        {
+            pk  = ($9  == "" ? "-" : $9"k");
+            sk  = ($10 == "" ? "-" : $10);
+            fin = ($11 == "" ? $3 : $11);
+            # Show start->end bucket, compact if they match.
+            if (fin == $3) bucket = $3"w"; else bucket = $3">"fin"w";
+            printf " %-11s %-8s %4ss %5s %2s %s\n", $1, bucket, $7, pk, sk, $8;
+        }'
 else
     echo " (no log yet)"
 fi
