@@ -782,6 +782,11 @@ def _configure_socket(writer) -> None:
         immediately. At 30 fps our writes are frequent enough that Nagle's
         coalescing adds up to ~200 ms of latency for no benefit — we're
         already batching at the application layer.
+      - TCP_QUICKACK (Linux) so inbound client bytes (keystrokes) are
+        ACK'd immediately instead of waiting up to 40ms for a piggyback.
+        Note Linux resets QUICKACK after each idle period; our 30fps
+        steady-state keeps the socket busy enough that it's effectively
+        always on for the input path that matters (seek / pause / quit).
     Best-effort: silently no-ops on platforms / transports that don't
     expose a socket."""
     try:
@@ -801,6 +806,8 @@ def _configure_socket(writer) -> None:
         if hasattr(socket, "TCP_KEEPCNT"):
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        if hasattr(socket, "TCP_QUICKACK"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
     except OSError as e:
         log.debug("socket setsockopt failed: %s", e)
 
