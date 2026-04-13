@@ -23,7 +23,8 @@ echo "----------------------------------------"
 echo " last 5 connections (  date   start/end    dur  pk  sk  out  )"
 if [ -f "$SR/state/connections.csv" ]; then
     # Columns: 1=ts 3=start_bucket 7=duration 8=outcome
-    # 9=peak_buf_kb 10=seek_count 11=final_bucket (added post c3d2b72).
+    # 9=peak_buf_kb 10=seek_count 11=final_bucket (added with the
+    # per-session telemetry work; see docs/performance-tuning.md).
     # Rows written by pre-instrumentation builds lack cols 9-11; awk
     # prints a "-" placeholder so the table stays aligned either way.
     tail -5 "$SR/state/connections.csv" | grep -v '^timestamp' | awk -F, '

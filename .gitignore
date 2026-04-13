@@ -53,5 +53,3 @@ logs/
 # that should not be part of the public repo
 system.info
 
-# local editor / agent settings
-.claude/
