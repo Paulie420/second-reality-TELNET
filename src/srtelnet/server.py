@@ -447,12 +447,24 @@ def _build_banner() -> list[tuple[str, str]]:
     return rows_out
 
 
+# Text of the "press any key" prompt on the welcome screen. Defined as
+# a module constant so render_welcome() can emit it AND shell() can
+# paint over it with a flashing overlay (many modern terminals ignore
+# the \x1b[5m blink SGR, so we drive the flash server-side instead).
+_JACK_IN_TEXT = ">>>   PRESS ANY KEY TO JACK IN   <<<"
+
+
 def render_welcome(
     cols: int, rows: int, session: int = 0, lifetime: int = 0
-) -> str:
+) -> tuple[str, int, int]:
     """Render a BBS-style truecolor ANSI welcome screen. Designed to fit
     exactly on an 80x25 terminal — taller terminals just get extra top/
     bottom margin via the centering math.
+
+    Returns (welcome_str, jack_row, jack_col) — the jack_row and jack_col
+    are 1-indexed terminal coordinates of the "PRESS ANY KEY TO JACK IN"
+    line so the caller can drive a flash animation over it without
+    re-rendering the whole screen.
 
     `session` is the connection counter since this process started.
     `lifetime` is the persistent all-time connection counter. Both slot
@@ -505,7 +517,7 @@ def render_welcome(
     # --- signoff + source + prompt (3 rows)
     add("streamed by paulie420  \u00b7  20forbeers.com", _C_GREEN)
     add("source:  github.com/Paulie420/second-reality-TELNET", _C_DIM)
-    add(">>>   PRESS ANY KEY TO JACK IN   <<<", _BOLD + _BLINK + _C_PINK)
+    add(_JACK_IN_TEXT, _BOLD + _BLINK + _C_PINK)
     # Total: 8 (banner) + 3 (subtitle) + 1 (stats) + 1 (credits) + 1 (gap)
     # + 5 (controls) + 3 (signoff+source+prompt) = 22 rows. Centered in 25
     # gives 1-row top + 2-row bottom margin.
@@ -513,11 +525,16 @@ def render_welcome(
     n = len(raw)
     top = max(0, (rows - n) // 2)
     out = [HOME, CLEAR]
+    jack_row = 0
+    jack_col = 0
     for i, (r_line, c_line) in enumerate(zip(raw, col)):
         pad = max(0, (cols - len(r_line)) // 2)
         out.append(f"\x1b[{top + i + 1};1H{' ' * pad}{c_line}")
+        if r_line == _JACK_IN_TEXT:
+            jack_row = top + i + 1
+            jack_col = pad + 1
     out.append(RESET)
-    return "".join(out)
+    return "".join(out), jack_row, jack_col
 
 
 def render_goodbye(
@@ -1258,16 +1275,36 @@ async def shell(reader, writer) -> None:
         await writer.drain()
 
         # --- welcome screen ---
-        writer.write(render_welcome(cols, rows, session=session, lifetime=lifetime))
+        welcome_str, jack_row, jack_col = render_welcome(
+            cols, rows, session=session, lifetime=lifetime)
+        writer.write(welcome_str)
         await writer.drain()
 
-        try:
-            key = await asyncio.wait_for(key_q.get(), timeout=30.0)
-            if key in ("QUIT", "DISCONNECT"):
-                outcome = "quit_welcome"
+        # Flash the "PRESS ANY KEY TO JACK IN" line server-side by
+        # repainting it every 500ms alternating between bright pink and
+        # dimmed-out. This survives terminals that ignore \x1b[5m (most
+        # modern terminals do — Alacritty, Kitty, Windows Terminal, etc.)
+        # while still giving blink-honoring terminals the SGR attribute
+        # for good measure. Exits on first keypress or 30s timeout.
+        flash_on = True
+        welcome_deadline = loop.time() + 30.0
+        while loop.time() < welcome_deadline:
+            style = (_BOLD + _BLINK + _C_PINK) if flash_on else _C_DIM
+            try:
+                writer.write(
+                    f"\x1b[{jack_row};{jack_col}H{style}{_JACK_IN_TEXT}{RESET}"
+                )
+                await writer.drain()
+            except (ConnectionResetError, BrokenPipeError):
                 return
-        except asyncio.TimeoutError:
-            pass
+            try:
+                key = await asyncio.wait_for(key_q.get(), timeout=0.5)
+                if key in ("QUIT", "DISCONNECT"):
+                    outcome = "quit_welcome"
+                    return
+                break  # any key -> start playback
+            except asyncio.TimeoutError:
+                flash_on = not flash_on
         await _drain_keys(key_q)
 
         bucket = pick_bucket(cols, rows)
