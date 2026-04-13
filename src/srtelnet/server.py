@@ -251,6 +251,31 @@ def pick_bucket(cols: int, rows: int) -> Bucket:
     return min(BUCKETS.values(), key=lambda b: b.width)
 
 
+def smaller_bucket(current: Bucket) -> Bucket | None:
+    """Return the next-smaller loaded bucket, or None if `current` is already
+    the smallest one available. Used by _play_once to downgrade a client
+    whose uplink can't sustain the current bucket's byte rate — a smaller
+    bucket means fewer bytes per frame and fewer skips per second."""
+    candidates = [b for b in BUCKETS.values() if b.width < current.width]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda b: b.width)
+
+
+def larger_bucket(current: Bucket, cap: Bucket) -> Bucket | None:
+    """Return the next-larger loaded bucket, capped at `cap.width` (exclusive
+    on the cap side — we don't go PAST the NAWS-determined bucket), or None
+    if already at or above the cap. Used by _play_once to upgrade a client
+    back toward their natural window-fit bucket after a streak of
+    successful frame writes — a momentary network blip that triggered a
+    downgrade shouldn't pin them at a smaller bucket forever."""
+    candidates = [b for b in BUCKETS.values()
+                  if current.width < b.width <= cap.width]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda b: b.width)
+
+
 def read_frame(bucket: Bucket, index: int) -> tuple[str, ...]:
     """Return the row tuple for frame `index`. Parses and caches on first
     hit, returns the cached tuple on every subsequent call. All concurrent
@@ -852,6 +877,25 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
     # did this client get"). seek_count counts LEFT/RIGHT keystrokes.
     peak_buffer_kb = 0
     seek_count = 0
+    # --- Adaptive bucket selection (per-client downgrade / upgrade) ---
+    # `naws_bucket` is the natural bucket size for the client's window,
+    # updated on every NAWS resize. It's the CAP — we never serve a
+    # larger bucket than this, but we can serve smaller ones if the
+    # client's link can't sustain the natural size.
+    # After DOWNGRADE_SECONDS of consecutive backpressure-skipped frames
+    # we step DOWN to the next-smaller loaded bucket. After
+    # UPGRADE_SECONDS of consecutive clean writes we step back UP
+    # toward naws_bucket. Asymmetric thresholds (fast-downgrade,
+    # slow-upgrade) prevent thrashing: momentary congestion doesn't
+    # permanently pin a client at a smaller bucket, but a client who
+    # can't sustain the big bucket doesn't get upgraded back into
+    # failure every few seconds.
+    DOWNGRADE_SECONDS = 2.0
+    UPGRADE_SECONDS = 10.0
+    downgrade_threshold = max(1, int(DOWNGRADE_SECONDS * fps))
+    upgrade_threshold = max(1, int(UPGRADE_SECONDS * fps))
+    naws_bucket = bucket
+    clean_streak = 0
 
     while i < n_frames:
         # Live NAWS resize handling. telnetlib3 updates the extra_info dict
@@ -873,6 +917,13 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
                 n_frames = len(bucket.paths)
                 if i >= n_frames:
                     i = n_frames - 1
+            # NAWS resize re-establishes the adaptive cap. User wants to
+            # see what fits their new window, so start fresh at the
+            # naws-picked bucket and let the downgrade logic kick back in
+            # from scratch if the link still can't sustain it.
+            naws_bucket = new_bucket
+            clean_streak = 0
+            consec_skip = 0
             top = max(0, (rows - bucket.height) // 2)
             left = max(0, (cols - bucket.width) // 2)
             # Old frame leaves stale cells around the edges of the new
@@ -979,15 +1030,81 @@ async def _play_once(writer, key_q, peer, bucket, cols, rows, fps) -> tuple[str,
         if (not force_next_frame and buf > WRITE_BUF_SKIP):
             skipped += 1
             consec_skip += 1
+            clean_streak = 0
             if consec_skip > MAX_CONSEC_SKIP:
                 log.info("%s %d consecutive skips, giving up", peer, consec_skip)
                 return ("DISCONNECT", i, skipped, peak_buffer_kb, seek_count, bucket.width)
+            # Adaptive downgrade: sustained backpressure means the client's
+            # uplink can't keep up with this bucket's byte rate. Step down
+            # to the next-smaller bucket — same frame count, fewer bytes
+            # per frame, so the buffer has a chance to drain and the skip
+            # cycle breaks. Repeatable; can trigger again on the smaller
+            # bucket if STILL too much.
+            if consec_skip >= downgrade_threshold:
+                new_bucket = smaller_bucket(bucket)
+                if new_bucket is not None:
+                    log.info(
+                        "%s adaptive downgrade: bucket %d -> %d "
+                        "(consec_skip=%d, naws_cap=%d)",
+                        peer, bucket.width, new_bucket.width,
+                        consec_skip, naws_bucket.width,
+                    )
+                    bucket = new_bucket
+                    n_frames = len(bucket.paths)
+                    if i >= n_frames:
+                        i = n_frames - 1
+                    top = max(0, (rows - bucket.height) // 2)
+                    left = max(0, (cols - bucket.width) // 2)
+                    # Wipe — the smaller bucket leaves stale cells at the
+                    # edges. Same rationale as NAWS resize.
+                    writer.write(CLEAR + HOME)
+                    # Wait briefly for the backlog of the larger bucket
+                    # to drain before we start stuffing smaller-bucket
+                    # frames behind it — otherwise the new frames stack
+                    # on the old ones and we'd just downgrade again at
+                    # the next threshold. Same pattern as drain-on-seek.
+                    drain_deadline = loop.time() + 1.5
+                    while (_write_buffer_size(writer) > WRITE_BUF_LOW
+                           and loop.time() < drain_deadline):
+                        await asyncio.sleep(0.05)
+                    consec_skip = 0
+                    clean_streak = 0
+                    # Guarantee the first frame from the new bucket lands
+                    # even if the drain wait didn't fully empty the buffer.
+                    force_next_frame = True
+                    target = loop.time()  # resync clock to new bucket
             i += 1
             target += frame_interval
             continue
 
         consec_skip = 0  # client is keeping up, reset the dead-client counter
         force_next_frame = False  # consumed; revert to normal skip behavior
+        clean_streak += 1
+        # Adaptive upgrade: after sustained clean playback, try stepping
+        # back toward the NAWS-determined natural bucket. A transient
+        # congestion burst that triggered a downgrade shouldn't pin the
+        # client at a smaller image for the rest of the demo. Upgrade
+        # threshold is deliberately higher than downgrade (10s vs 2s) to
+        # prevent thrashing.
+        if (clean_streak >= upgrade_threshold
+                and bucket.width < naws_bucket.width):
+            new_bucket = larger_bucket(bucket, naws_bucket)
+            if new_bucket is not None:
+                log.info(
+                    "%s adaptive upgrade: bucket %d -> %d "
+                    "(clean_streak=%d, naws_cap=%d)",
+                    peer, bucket.width, new_bucket.width,
+                    clean_streak, naws_bucket.width,
+                )
+                bucket = new_bucket
+                n_frames = len(bucket.paths)
+                if i >= n_frames:
+                    i = n_frames - 1
+                top = max(0, (rows - bucket.height) // 2)
+                left = max(0, (cols - bucket.width) // 2)
+                writer.write(CLEAR + HOME)
+                clean_streak = 0
+                target = loop.time()
 
         try:
             lines = read_frame(bucket, i)

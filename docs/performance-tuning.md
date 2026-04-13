@@ -46,12 +46,15 @@ work, no rebake, no visual change, and fixes the user-visible complaint.
 
 - [x] **4. Bandwidth reduction at the chafa stage.** *(shipped as 20fps
       truecolor rebake, 2026-04-12 — see post-mortem below)*
-- [ ] **5. Per-client bucket downgrade on sustained backpressure.** If
-      `consec_skip` stays above a threshold for a few seconds, drop the
-      client to the next smaller bucket (e.g. 120 → 100 → 80). Keeps WAN
-      clients in a bucket their pipe can actually sustain. Moderate
-      implementation cost; stacks cleanly on the existing NAWS-driven
-      bucket switch.
+- [x] **5. Per-client bucket downgrade on sustained backpressure.**
+      *(shipped — commit following the wall-clock refactor.)* After 2s
+      of consecutive backpressure-skipped frames the play loop steps
+      the client down to the next-smaller loaded bucket; after 10s of
+      clean writes it steps back up, capped at the NAWS-determined
+      natural bucket. Asymmetric thresholds (fast downgrade, slow
+      upgrade) prevent thrashing. The final bucket width per session is
+      logged to `state/connections.csv` as the `final_bucket_width`
+      column so the downgrade rate is measurable post-hoc.
 - [ ] **6. On-connect bandwidth probe.** Write a ~200 KB pad at connect
       time, measure drain rate, bias the initial bucket pick accordingly.
       Rougher than #5 but simpler. Best combined with #5.
